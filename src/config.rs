@@ -121,8 +121,14 @@ pub struct AccountConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuthConfig {
+    /// Interactive browser login through Snowflake's built-in local application.
+    OauthLocal,
     Oauth {
         #[serde(default = "default_oauth_env")]
+        token_env: String,
+    },
+    ProgrammaticAccessToken {
+        #[serde(default = "default_pat_env")]
         token_env: String,
     },
     KeyPair {
@@ -244,6 +250,36 @@ impl Config {
                     account.account
                 );
             }
+            if account
+                .selector
+                .as_ref()
+                .is_some_and(|selector| selector.trim().is_empty())
+            {
+                bail!("account {} has an empty dbt selector", account.name);
+            }
+            match &account.auth {
+                AuthConfig::OauthLocal => {}
+                AuthConfig::Oauth { token_env }
+                | AuthConfig::ProgrammaticAccessToken { token_env } => {
+                    if token_env.trim().is_empty() {
+                        bail!("account {} has an empty token_env", account.name);
+                    }
+                }
+                AuthConfig::KeyPair {
+                    private_key_path,
+                    passphrase_env,
+                } => {
+                    if private_key_path.as_os_str().is_empty() {
+                        bail!("account {} has an empty private_key_path", account.name);
+                    }
+                    if passphrase_env
+                        .as_ref()
+                        .is_some_and(|value| value.trim().is_empty())
+                    {
+                        bail!("account {} has an empty passphrase_env", account.name);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -325,6 +361,9 @@ fn default_rate_threshold() -> f64 {
 fn default_oauth_env() -> String {
     "SNOWFLAKE_OAUTH_TOKEN".into()
 }
+fn default_pat_env() -> String {
+    "SNOWFLAKE_PROGRAMMATIC_ACCESS_TOKEN".into()
+}
 fn default_metabase_env() -> String {
     "METABASE_API_KEY".into()
 }
@@ -369,5 +408,33 @@ accounts:
     fn example_config_stays_valid() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("embrasure-check.example.yml");
         Config::load(&path).unwrap();
+    }
+
+    #[test]
+    fn enterprise_auth_methods_and_two_accounts_are_valid() {
+        let yaml = r#"
+version: 1
+accounts:
+  - name: developer
+    account: org-one
+    user: analyst
+    role: dbt_ci
+    database: analytics
+    warehouse: dbt_ci
+    production_schema: prod
+    selector: tag:one
+    auth: { type: oauth_local }
+  - name: ci
+    account: org-two
+    user: service
+    role: dbt_ci
+    database: analytics
+    warehouse: dbt_ci
+    production_schema: prod
+    selector: tag:two
+    auth: { type: programmatic_access_token, token_env: SECOND_ACCOUNT_PAT }
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
     }
 }

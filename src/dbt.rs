@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -14,7 +14,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use crate::{
-    config::{AccountConfig, AuthConfig, Config},
+    auth::ResolvedAuth,
+    config::{AccountConfig, Config},
     report::{CoverageGap, ImpactReport, ImpactedAsset},
 };
 
@@ -120,6 +121,8 @@ struct ProfileOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     private_key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     private_key_passphrase: Option<String>,
@@ -201,6 +204,7 @@ impl Manifest {
 
 pub fn prepare(
     config: &Config,
+    auth: &BTreeMap<String, ResolvedAuth>,
     base: &str,
     ci_schema: &str,
     query_tag: &str,
@@ -213,6 +217,7 @@ pub fn prepare(
     fs::create_dir_all(&profiles_dir)?;
     write_profiles(
         config,
+        auth,
         &profiles_dir,
         |_account| ci_schema.to_owned(),
         query_tag,
@@ -271,6 +276,7 @@ pub fn prepare(
         fs::create_dir_all(&base_profiles)?;
         write_profiles(
             config,
+            auth,
             &base_profiles,
             |account| account.production_schema.clone(),
             query_tag,
@@ -691,6 +697,7 @@ impl Drop for WorktreeRegistration {
 
 fn write_profiles(
     config: &Config,
+    auth: &BTreeMap<String, ResolvedAuth>,
     dir: &Path,
     schema: impl Fn(&AccountConfig) -> String,
     query_tag: &str,
@@ -703,32 +710,28 @@ fn write_profiles(
             "STATEMENT_TIMEOUT_IN_SECONDS".to_owned(),
             Value::from(config.safety.statement_timeout_seconds),
         );
-        let (authenticator, token, private_key_path, private_key_passphrase) = match &account.auth {
-            AuthConfig::Oauth { token_env } => (
-                Some("oauth"),
-                Some(env::var(token_env).with_context(|| {
-                    format!("missing OAuth token environment variable {token_env}")
-                })?),
-                None,
-                None,
-            ),
-            AuthConfig::KeyPair {
-                private_key_path,
-                passphrase_env,
-            } => (
-                None,
-                None,
-                Some(private_key_path.to_string_lossy().into_owned()),
-                passphrase_env
-                    .as_ref()
-                    .map(|name| {
-                        env::var(name).with_context(|| {
-                            format!("missing key passphrase environment variable {name}")
-                        })
-                    })
-                    .transpose()?,
-            ),
-        };
+        let resolved = auth
+            .get(&account.name)
+            .with_context(|| format!("resolved auth is missing for account {}", account.name))?;
+        let (authenticator, token, password, private_key_path, private_key_passphrase) =
+            match resolved {
+                ResolvedAuth::OAuth { token } => {
+                    (Some("oauth"), Some(token.clone()), None, None, None)
+                }
+                ResolvedAuth::KeyPair {
+                    private_key_path,
+                    passphrase,
+                } => (
+                    None,
+                    None,
+                    None,
+                    Some(private_key_path.to_string_lossy().into_owned()),
+                    passphrase.clone(),
+                ),
+                ResolvedAuth::ProgrammaticAccessToken { token } => {
+                    (None, None, Some(token.clone()), None, None)
+                }
+            };
         outputs.insert(
             account.name.clone(),
             ProfileOutput {
@@ -742,6 +745,7 @@ fn write_profiles(
                 threads: config.dbt.threads,
                 authenticator,
                 token,
+                password,
                 private_key_path,
                 private_key_passphrase,
                 query_tag: query_tag.to_owned(),
@@ -854,6 +858,7 @@ fn path_str(path: &Path) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{auth::ResolvedAuth, config::Config};
 
     fn node(id: &str) -> ManifestNode {
         ManifestNode {
@@ -902,5 +907,33 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].unique_id, "test.analytics.not_null_orders_id");
         assert!(failures[0].message.contains("Got 2 results"));
+    }
+
+    #[test]
+    fn pat_is_written_as_a_temporary_dbt_password() {
+        let yaml = r#"
+version: 1
+accounts:
+  - name: ci
+    account: org-account
+    user: service
+    role: dbt_ci
+    database: analytics
+    warehouse: dbt_ci
+    production_schema: prod
+    auth: { type: programmatic_access_token, token_env: PAT }
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let auth = BTreeMap::from([(
+            "ci".into(),
+            ResolvedAuth::ProgrammaticAccessToken {
+                token: "secret-pat".into(),
+            },
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        write_profiles(&config, &auth, dir.path(), |_| "CHECK".into(), "tag").unwrap();
+        let profile = fs::read_to_string(dir.path().join("profiles.yml")).unwrap();
+        assert!(profile.contains("password: secret-pat"));
+        assert!(!profile.contains("authenticator:"));
     }
 }

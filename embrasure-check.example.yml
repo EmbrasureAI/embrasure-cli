@@ -31,10 +31,10 @@ accounts:
     # Required when more than one account is configured. This is a dbt selector.
     # selector: tag:primary_account
     auth:
-      type: oauth
-      token_env: SNOWFLAKE_OAUTH_TOKEN
+      # Best for a developer or local agent. Run `embrasure-check auth login` once.
+      type: oauth_local
 
-  # A second Snowflake account can use key-pair authentication.
+  # A second Snowflake account can use its own non-interactive credential.
   # - name: secondary
   #   account: your_org-your_second_account
   #   user: DBT_CI
@@ -44,9 +44,8 @@ accounts:
   #   production_schema: PROD
   #   selector: tag:secondary_account
   #   auth:
-  #     type: key_pair
-  #     private_key_path: ~/.snowflake/rsa_key.p8
-  #     passphrase_env: SNOWFLAKE_PRIVATE_KEY_PASSPHRASE
+  #     type: programmatic_access_token
+  #     token_env: SECONDARY_SNOWFLAKE_PAT
 
 models:
   # Keys may be dbt unique IDs or model names.

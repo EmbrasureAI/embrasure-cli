@@ -21,7 +21,10 @@ use sha2::{Digest, Sha256};
 use tokio::time::sleep;
 use uuid::Uuid;
 
-use crate::config::{AccountConfig, AuthConfig};
+use crate::{
+    auth::{ResolvedAuth, account_host},
+    config::AccountConfig,
+};
 
 pub struct SnowflakeClient {
     http: Client,
@@ -72,32 +75,33 @@ impl Relation {
 }
 
 impl SnowflakeClient {
-    pub fn new(account: &AccountConfig, query_tag: String, timeout_seconds: u64) -> Result<Self> {
-        let (token, token_type) = match &account.auth {
-            AuthConfig::Oauth { token_env } => (
-                env::var(token_env).with_context(|| {
-                    format!("missing OAuth token environment variable {token_env}")
-                })?,
-                "OAUTH",
-            ),
-            AuthConfig::KeyPair {
+    pub fn new(
+        account: &AccountConfig,
+        auth: &ResolvedAuth,
+        query_tag: String,
+        timeout_seconds: u64,
+    ) -> Result<Self> {
+        let (token, token_type) = match auth {
+            ResolvedAuth::OAuth { token } => (token.clone(), "OAUTH"),
+            ResolvedAuth::KeyPair {
                 private_key_path,
-                passphrase_env,
+                passphrase,
             } => (
-                key_pair_jwt(account, private_key_path, passphrase_env.as_deref())?,
+                key_pair_jwt(account, private_key_path, passphrase.as_deref())?,
                 "KEYPAIR_JWT",
             ),
+            ResolvedAuth::ProgrammaticAccessToken { token } => {
+                (token.clone(), "PROGRAMMATIC_ACCESS_TOKEN")
+            }
         };
-        let account_host = account
-            .account
-            .trim()
-            .to_ascii_lowercase()
-            .replace('_', "-");
         Ok(Self {
             http: Client::builder()
                 .timeout(Duration::from_secs(timeout_seconds + 30))
                 .build()?,
-            endpoint: format!("https://{account_host}.snowflakecomputing.com/api/v2/statements"),
+            endpoint: format!(
+                "https://{}/api/v2/statements",
+                account_host(&account.account)
+            ),
             token,
             token_type,
             account: account.clone(),
@@ -286,16 +290,10 @@ fn statement_body(
 fn key_pair_jwt(
     account: &AccountConfig,
     path: &std::path::Path,
-    passphrase_env: Option<&str>,
+    passphrase: Option<&str>,
 ) -> Result<String> {
     let pem = fs::read_to_string(path)
         .with_context(|| format!("could not read private key {}", path.display()))?;
-    let passphrase = passphrase_env
-        .map(|name| {
-            env::var(name)
-                .with_context(|| format!("missing key passphrase environment variable {name}"))
-        })
-        .transpose()?;
     let key: PKey<Private> = if let Some(passphrase) = passphrase {
         PKey::private_key_from_pem_passphrase(pem.as_bytes(), passphrase.as_bytes())
             .context("could not decrypt RSA private key")?

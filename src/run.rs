@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
 use crate::{
+    auth,
     compare::compare_model,
     config::{Config, ModelConfig},
     dbt::{self, DbtContext, ManifestNode},
@@ -30,6 +31,9 @@ pub async fn run_check(config_path: &Path, base: &str) -> Report {
 }
 
 async fn execute(config: &Config, base: &str, report: &mut Report) -> Result<()> {
+    let resolved_auth = auth::resolve_all(config)
+        .await
+        .context("could not resolve Snowflake credentials")?;
     let schema = dbt::ci_schema_name(&config.safety.schema_prefix, &config.dbt.project_dir)?;
     let query_tag = format!(
         "embrasure-check:{}:{}",
@@ -42,6 +46,9 @@ async fn execute(config: &Config, base: &str, report: &mut Report) -> Result<()>
         for account in &config.accounts {
             let client = SnowflakeClient::new(
                 account,
+                resolved_auth
+                    .get(&account.name)
+                    .context("resolved Snowflake credential was not retained")?,
                 query_tag.clone(),
                 config.safety.statement_timeout_seconds,
             )
@@ -63,7 +70,7 @@ async fn execute(config: &Config, base: &str, report: &mut Report) -> Result<()>
                 })?;
         }
 
-        let mut context = dbt::prepare(config, base, &schema, &query_tag)?;
+        let mut context = dbt::prepare(config, &resolved_auth, base, &schema, &query_tag)?;
         let result = execute_with_dbt(config, &mut context, &clients, report).await;
         if let Err(error) = context.cleanup_worktree() {
             report

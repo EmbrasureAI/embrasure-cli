@@ -111,6 +111,26 @@ pub async fn find_dashboard_impact(
     Ok((impacted, gaps))
 }
 
+pub async fn check_connection(config: &MetabaseConfig) -> Result<usize> {
+    let key = env::var(&config.api_key_env).with_context(|| {
+        format!(
+            "missing Metabase API key environment variable {}",
+            config.api_key_env
+        )
+    })?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-api-key",
+        HeaderValue::from_str(&key).context("invalid Metabase API key")?,
+    );
+    let client = Client::builder().default_headers(headers).build()?;
+    let base = config.url.trim_end_matches('/');
+    let cards = get_json(&client, &format!("{base}/api/card?f=all")).await?;
+    Ok(array_payload(&cards)
+        .context("Metabase cards response was not an array")?
+        .len())
+}
+
 async fn get_json(client: &Client, url: &str) -> Result<Value> {
     let response = client
         .get(url)

@@ -44,27 +44,52 @@ Argument parsing errors use clap's conventional exit code `2` before a report ca
 - Rust 1.85+ to build the CLI.
 - Git and dbt Core with the Snowflake adapter on `PATH` to run a check.
 - A dbt Snowflake user with permission to use the configured warehouse/database, create and drop schemas, and read production relations.
-- OAuth or RSA key-pair credentials in environment variables/files. Credentials are never written to the report.
+- A supported Snowflake credential. Credentials are never written to reports or normal terminal output.
 
 ## Install
 
 ```sh
-cargo install --git https://github.com/EmbrasureAI/embrasure-check --tag v0.1.0 --locked
+cargo install --git https://github.com/EmbrasureAI/embrasure-check --tag v0.2.0 --locked
 ```
 
 ## Configure
 
 Copy [`embrasure-check.example.yml`](embrasure-check.example.yml) to `embrasure-check.yml` in the dbt repository. The CLI generates a temporary `profiles.yml`; existing user profiles are not changed.
 
-For OAuth:
+For a local developer or coding agent, use Snowflake browser login:
 
 ```sh
-export SNOWFLAKE_OAUTH_TOKEN='...'
+embrasure-check auth login
+embrasure-check doctor
 ```
 
-For key-pair auth, configure `private_key_path` and optionally `passphrase_env`. Both PKCS#1 and PKCS#8 PEM keys are supported. The same credential is used by dbt and the Snowflake SQL API.
+This uses Snowflake's [built-in local OAuth application](https://docs.snowflake.com/en/user-guide/oauth-local-applications) and PKCE. The short-lived access token and refresh token are stored under `~/.config/embrasure-check/oauth/` with owner-only permissions on Unix. Use `auth status` to inspect readiness and `auth logout` to remove it.
+
+For CI, use a role-restricted [programmatic access token](https://docs.snowflake.com/en/user-guide/programmatic-access-tokens):
+
+```yaml
+auth:
+  type: programmatic_access_token
+  token_env: SNOWFLAKE_PROGRAMMATIC_ACCESS_TOKEN
+```
+
+RSA key-pair auth is also supported with `private_key_path` and optional `passphrase_env`; both PKCS#1 and PKCS#8 PEM keys work. Existing external OAuth pipelines can use `type: oauth` plus `token_env`. The selected credential is reused by dbt and the Snowflake SQL API.
 
 With two Snowflake accounts, add two `accounts` entries and give each a dbt `selector` so a model is built only in its owning account.
+
+See the [enterprise setup guide](docs/enterprise.md) for least-privilege Snowflake grants, service-user auth, multiple accounts, and Metabase.
+
+## Verify setup
+
+Run this before the first validation or after changing credentials:
+
+```sh
+embrasure-check auth status
+embrasure-check doctor
+embrasure-check doctor --json
+```
+
+`doctor` connects to every configured Snowflake account, confirms the requested role/warehouse/database, checks production read access, creates and removes a uniquely named temporary schema, and authenticates to Metabase when configured. Use `--read-only` when an administrator wants a non-mutating diagnostic, although that cannot prove CI schema permissions.
 
 ## Run
 
