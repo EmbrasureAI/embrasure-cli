@@ -1,0 +1,70 @@
+version: 1
+
+dbt:
+  project_dir: .
+  profile: analytics
+  # Optional. Without this, a production manifest is generated from --base.
+  # state_dir: target/production-artifacts
+  threads: 4
+
+safety:
+  schema_prefix: EMBRASURE_CHECK
+  statement_timeout_seconds: 300
+  max_models: 25
+  max_columns_per_model: 100
+  primary_key_sample_limit: 20
+
+thresholds:
+  row_count_relative: 0.001
+  null_rate_absolute: 0.001
+  cardinality_relative: 0.001
+  numeric_relative: 0.001
+
+accounts:
+  - name: primary
+    account: your_org-your_account
+    user: DBT_CI
+    role: DBT_CI_ROLE
+    database: ANALYTICS
+    warehouse: DBT_CI_WH
+    production_schema: PROD
+    # Required when more than one account is configured. This is a dbt selector.
+    # selector: tag:primary_account
+    auth:
+      type: oauth
+      token_env: SNOWFLAKE_OAUTH_TOKEN
+
+  # A second Snowflake account can use key-pair authentication.
+  # - name: secondary
+  #   account: your_org-your_second_account
+  #   user: DBT_CI
+  #   role: DBT_CI_ROLE
+  #   database: ANALYTICS
+  #   warehouse: DBT_CI_WH
+  #   production_schema: PROD
+  #   selector: tag:secondary_account
+  #   auth:
+  #     type: key_pair
+  #     private_key_path: ~/.snowflake/rsa_key.p8
+  #     passphrase_env: SNOWFLAKE_PRIVATE_KEY_PASSPHRASE
+
+models:
+  # Keys may be dbt unique IDs or model names.
+  model.orders:
+    primary_key: [order_id]
+
+# Optional non-dbt changes that should invalidate dbt models.
+external_changes:
+  - path: warehouse/shared/**/*.sql
+    models: [model.analytics.orders]
+
+# Optional declared dependencies that dbt cannot see.
+cross_account_dependencies:
+  - from: model.analytics.orders
+    to: secondary:ANALYTICS.PROD.ORDER_EXPORT
+    columns: [order_id]
+
+# Optional, read-only Metabase impact lookup.
+# metabase:
+#   url: https://metabase.example.com
+#   api_key_env: METABASE_API_KEY

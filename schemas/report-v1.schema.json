@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/EmbrasureAI/embrasure-check/schemas/report-v1.schema.json",
+  "title": "embrasure-check report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "exit_code",
+    "base",
+    "ci_schemas",
+    "thresholds",
+    "summary",
+    "models",
+    "impact",
+    "findings",
+    "coverage_gaps",
+    "execution_errors"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "status": { "enum": ["pass", "findings", "incomplete", "execution_failure"] },
+    "exit_code": { "enum": [0, 1, 2, 3] },
+    "base": { "type": "string" },
+    "ci_schemas": { "type": "array", "items": { "$ref": "#/$defs/ci_schema" } },
+    "thresholds": { "$ref": "#/$defs/thresholds" },
+    "summary": { "$ref": "#/$defs/summary" },
+    "models": { "type": "array", "items": { "$ref": "#/$defs/model" } },
+    "impact": { "$ref": "#/$defs/impact" },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "coverage_gaps": { "type": "array", "items": { "$ref": "#/$defs/coverage_gap" } },
+    "execution_errors": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "ci_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "database", "schema", "cleaned_up"],
+      "properties": {
+        "account": { "type": "string" },
+        "database": { "type": "string" },
+        "schema": { "type": "string" },
+        "cleaned_up": { "type": "boolean" }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_count_relative", "null_rate_absolute", "cardinality_relative", "numeric_relative"],
+      "properties": {
+        "row_count_relative": { "type": "number", "minimum": 0 },
+        "null_rate_absolute": { "type": "number", "minimum": 0 },
+        "cardinality_relative": { "type": "number", "minimum": 0 },
+        "numeric_relative": { "type": "number", "minimum": 0 }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["models_selected", "models_built", "models_compared", "findings", "coverage_gaps"],
+      "properties": {
+        "models_selected": { "type": "integer", "minimum": 0 },
+        "models_built": { "type": "integer", "minimum": 0 },
+        "models_compared": { "type": "integer", "minimum": 0 },
+        "findings": { "type": "integer", "minimum": 0 },
+        "coverage_gaps": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unique_id", "name", "account", "ci_relation", "production_relation", "dbt_build", "comparison"],
+      "properties": {
+        "unique_id": { "type": "string" },
+        "name": { "type": "string" },
+        "account": { "type": "string" },
+        "ci_relation": { "type": "string" },
+        "production_relation": { "type": ["string", "null"] },
+        "dbt_build": { "enum": ["pending", "passed", "failed"] },
+        "comparison": { "type": ["object", "null"] }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "check", "message"],
+      "properties": {
+        "model": { "type": "string" },
+        "check": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "coverage_gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "check", "reason"],
+      "properties": {
+        "scope": { "type": "string" },
+        "check": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "url": { "type": "string" }
+      }
+    },
+    "cross_account_dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "columns"],
+      "properties": {
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "columns": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "impact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dbt_models", "dbt_exposures", "metabase_dashboards", "cross_account_dependencies"],
+      "properties": {
+        "dbt_models": { "type": "array", "items": { "$ref": "#/$defs/asset" } },
+        "dbt_exposures": { "type": "array", "items": { "$ref": "#/$defs/asset" } },
+        "metabase_dashboards": { "type": "array", "items": { "$ref": "#/$defs/asset" } },
+        "cross_account_dependencies": { "type": "array", "items": { "$ref": "#/$defs/cross_account_dependency" } }
+      }
+    }
+  }
+}

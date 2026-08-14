@@ -1,0 +1,13 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+setup = "cargo fetch"
+run_mode = "concurrent"
+
+[scripts.run.test]
+command = "cargo test"
+icon = "test-tube"
+
+[scripts.run.check]
+command = "cargo clippy --all-targets --all-features -- -D warnings"
+icon = "scan-search"
