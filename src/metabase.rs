@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, env};
+use std::{collections::BTreeSet, env, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use reqwest::{
@@ -17,18 +17,7 @@ pub async fn find_dashboard_impact(
     config: &MetabaseConfig,
     relations: &[(String, Relation)],
 ) -> Result<(Vec<ImpactedAsset>, Vec<CoverageGap>)> {
-    let key = env::var(&config.api_key_env).with_context(|| {
-        format!(
-            "missing Metabase API key environment variable {}",
-            config.api_key_env
-        )
-    })?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "x-api-key",
-        HeaderValue::from_str(&key).context("invalid Metabase API key")?,
-    );
-    let client = Client::builder().default_headers(headers).build()?;
+    let client = metabase_client(config)?;
     let base = config.url.trim_end_matches('/');
     let cards = get_json(&client, &format!("{base}/api/card?f=all")).await?;
     let card_values = array_payload(&cards).context("Metabase cards response was not an array")?;
@@ -112,23 +101,37 @@ pub async fn find_dashboard_impact(
 }
 
 pub async fn check_connection(config: &MetabaseConfig) -> Result<usize> {
+    let client = metabase_client(config)?;
+    let base = config.url.trim_end_matches('/');
+    let cards = get_json(&client, &format!("{base}/api/card?f=all")).await?;
+    Ok(array_payload(&cards)
+        .context("Metabase cards response was not an array")?
+        .len())
+}
+
+fn metabase_client(config: &MetabaseConfig) -> Result<Client> {
     let key = env::var(&config.api_key_env).with_context(|| {
         format!(
             "missing Metabase API key environment variable {}",
             config.api_key_env
         )
     })?;
+    if key.trim().is_empty() {
+        bail!(
+            "Metabase API key environment variable {} is empty",
+            config.api_key_env
+        );
+    }
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-api-key",
         HeaderValue::from_str(&key).context("invalid Metabase API key")?,
     );
-    let client = Client::builder().default_headers(headers).build()?;
-    let base = config.url.trim_end_matches('/');
-    let cards = get_json(&client, &format!("{base}/api/card?f=all")).await?;
-    Ok(array_payload(&cards)
-        .context("Metabase cards response was not an array")?
-        .len())
+    Client::builder()
+        .default_headers(headers)
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("could not initialize Metabase HTTP client")
 }
 
 async fn get_json(client: &Client, url: &str) -> Result<Value> {

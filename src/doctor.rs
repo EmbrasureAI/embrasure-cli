@@ -1,5 +1,6 @@
 use std::{path::Path, process::Command};
 
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -7,7 +8,7 @@ use crate::{
     auth,
     config::Config,
     metabase,
-    snowflake::{SnowflakeClient, quote_identifier},
+    snowflake::{QueryResult, SnowflakeClient, quote_identifier},
 };
 
 #[derive(Debug, Serialize)]
@@ -116,14 +117,13 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
             .execute("SELECT CURRENT_ACCOUNT(), CURRENT_USER(), CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_DATABASE()")
             .await
         {
-            Ok(result) => {
-                let identity = result
-                    .rows
-                    .first()
-                    .map(|row| row.iter().map(|value| value.as_deref().unwrap_or("NULL")).collect::<Vec<_>>().join(" / "))
-                    .unwrap_or_else(|| "connected".into());
-                report.pass(&scope, "session", identity);
-            }
+            Ok(result) => match verify_session(account, &result) {
+                Ok(identity) => report.pass(&scope, "session", identity),
+                Err(error) => {
+                    report.fail(&scope, "session", format!("{error:#}"));
+                    continue;
+                }
+            },
             Err(error) => {
                 report.fail(&scope, "session", format!("{error:#}"));
                 continue;
@@ -135,32 +135,36 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
             quote_identifier(&account.production_schema)
         );
         match client.execute(&production).await {
-            Ok(result) => {
-                let table_name_index = result
-                    .columns
-                    .iter()
-                    .position(|column| column.name.eq_ignore_ascii_case("name"));
-                let first_table = table_name_index.and_then(|index| {
-                    result
-                        .rows
-                        .first()
-                        .and_then(|row| row.get(index))
-                        .and_then(|value| value.as_deref())
-                });
-                if let Some(table) = first_table {
+            Ok(tables) => {
+                let mut relations = relation_names(&tables);
+                let views = format!(
+                    "SHOW VIEWS IN SCHEMA {}.{}",
+                    quote_identifier(&account.database),
+                    quote_identifier(&account.production_schema)
+                );
+                match client.execute(&views).await {
+                    Ok(views) => relations.extend(relation_names(&views)),
+                    Err(error) => {
+                        report.fail(&scope, "production_read", format!("{error:#}"));
+                        continue;
+                    }
+                }
+                relations.sort();
+                relations.dedup();
+                if let Some(relation) = relations.first() {
                     let sample = format!(
                         "SELECT * FROM {}.{}.{} LIMIT 0",
                         quote_identifier(&account.database),
                         quote_identifier(&account.production_schema),
-                        quote_identifier(table)
+                        quote_identifier(relation)
                     );
                     match client.execute(&sample).await {
                         Ok(_) => report.pass(
                             &scope,
                             "production_read",
                             format!(
-                                "can read production; {} visible table(s)",
-                                result.rows.len()
+                                "can read production; {} visible table(s) or view(s)",
+                                relations.len()
                             ),
                         ),
                         Err(error) => report.fail(&scope, "production_read", format!("{error:#}")),
@@ -169,7 +173,7 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
                     report.pass(
                         &scope,
                         "production_read",
-                        "production schema is visible but contains no tables",
+                        "production schema is visible but contains no tables or views",
                     );
                 }
             }
@@ -182,9 +186,9 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
                 config.safety.schema_prefix.to_ascii_uppercase(),
                 Uuid::new_v4().simple()
             );
-            match client.create_schema(&schema).await {
+            match client.create_schema(&account.database, &schema).await {
                 Ok(()) => match client
-                    .drop_schema(&schema, &config.safety.schema_prefix)
+                    .drop_schema(&account.database, &schema, &schema)
                     .await
                 {
                     Ok(()) => report.pass(
@@ -222,6 +226,53 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
         report.skip("metabase", "api", "not configured (optional)");
     }
     report
+}
+
+fn verify_session(account: &crate::config::AccountConfig, result: &QueryResult) -> Result<String> {
+    let row = result
+        .rows
+        .first()
+        .context("Snowflake session query returned no rows")?;
+    let values = (0..5)
+        .map(|index| {
+            row.get(index)
+                .and_then(|value| value.as_deref())
+                .with_context(|| {
+                    format!(
+                        "Snowflake session query returned NULL at column {}",
+                        index + 1
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (label, actual, expected) in [
+        ("user", values[1], account.user.as_str()),
+        ("role", values[2], account.role.as_str()),
+        ("warehouse", values[3], account.warehouse.as_str()),
+        ("database", values[4], account.database.as_str()),
+    ] {
+        if !actual.eq_ignore_ascii_case(expected) {
+            bail!(
+                "requested {label} {expected}, but Snowflake activated {actual}; check grants and configuration"
+            );
+        }
+    }
+    Ok(values.join(" / "))
+}
+
+fn relation_names(result: &QueryResult) -> Vec<String> {
+    let Some(index) = result
+        .columns
+        .iter()
+        .position(|column| column.name.eq_ignore_ascii_case("name"))
+    else {
+        return vec![];
+    };
+    result
+        .rows
+        .iter()
+        .filter_map(|row| row.get(index).and_then(|value| value.clone()))
+        .collect()
 }
 
 impl DoctorReport {
@@ -293,6 +344,7 @@ impl DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{config::AuthConfig, snowflake::ResultColumn};
 
     #[test]
     fn a_failure_makes_the_report_not_ready() {
@@ -305,5 +357,43 @@ mod tests {
         report.fail("snowflake:one", "session", "denied");
         assert!(!report.ready);
         assert!(report.human().contains("NOT READY"));
+    }
+
+    #[test]
+    fn session_check_rejects_a_role_snowflake_did_not_activate() {
+        let account = crate::config::AccountConfig {
+            name: "one".into(),
+            account: "org-account".into(),
+            user: "CI_USER".into(),
+            role: "DBT_CI".into(),
+            database: "ANALYTICS".into(),
+            warehouse: "DBT_CI_WH".into(),
+            production_schema: "PROD".into(),
+            selector: None,
+            auth: AuthConfig::Oauth {
+                token_env: "TOKEN".into(),
+            },
+        };
+        let result = QueryResult {
+            columns: (0..5)
+                .map(|index| ResultColumn {
+                    name: index.to_string(),
+                    data_type: "TEXT".into(),
+                })
+                .collect(),
+            rows: vec![vec![
+                Some("ACCOUNT".into()),
+                Some("CI_USER".into()),
+                Some("PUBLIC".into()),
+                Some("DBT_CI_WH".into()),
+                Some("ANALYTICS".into()),
+            ]],
+        };
+        assert!(
+            verify_session(&account, &result)
+                .unwrap_err()
+                .to_string()
+                .contains("role")
+        );
     }
 }

@@ -8,10 +8,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use globset::Glob;
-use rand::{Rng, distributions::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 use crate::{
     auth::ResolvedAuth,
@@ -37,6 +37,8 @@ pub struct ManifestNode {
     pub schema: String,
     pub alias: String,
     pub fqn: Vec<String>,
+    #[serde(default)]
+    pub depends_on: DependsOn,
     #[serde(default)]
     pub config: NodeConfig,
 }
@@ -162,6 +164,34 @@ impl Manifest {
         } else {
             Some(found)
         }
+    }
+
+    pub fn removed_models(&self, current: &Manifest) -> BTreeSet<String> {
+        self.nodes
+            .iter()
+            .filter(|(id, node)| {
+                node.resource_type == "model"
+                    && current
+                        .nodes
+                        .get(*id)
+                        .is_none_or(|current_node| current_node.resource_type != "model")
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn model_dependencies(&self, node_ids: &BTreeSet<String>) -> BTreeSet<String> {
+        node_ids
+            .iter()
+            .filter_map(|id| self.nodes.get(id))
+            .flat_map(|node| node.depends_on.nodes.iter())
+            .filter(|id| {
+                self.nodes
+                    .get(*id)
+                    .is_some_and(|node| node.resource_type == "model")
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn impact(&self, selected: &BTreeSet<String>) -> ImpactReport {
@@ -415,6 +445,7 @@ pub fn select_models(
     changed_paths: &[String],
 ) -> Result<BTreeSet<String>> {
     let manifest = context.manifest(&account.name)?;
+    let production_manifest = context.production_manifest(&account.name)?;
     let mut selector = String::from("state:modified+");
     if let Some(account_selector) = &account.selector {
         selector.push(',');
@@ -441,14 +472,43 @@ pub fn select_models(
             "unique_id",
         ],
     )?;
-    let mut selected = BTreeSet::new();
-    for line in output.lines().filter(|line| !line.trim().is_empty()) {
-        if let Ok(value) = serde_json::from_str::<Value>(line)
-            && let Some(id) = value.get("unique_id").and_then(Value::as_str)
-        {
-            selected.insert(id.to_owned());
-        }
-    }
+    let mut selected = unique_ids(&output)?;
+
+    let modified_tests = dbt_output(
+        config,
+        &config.dbt.project_dir,
+        &context.profiles_dir,
+        &[
+            "ls",
+            "--quiet",
+            "--target",
+            &account.name,
+            "--state",
+            path_str(context.state_dir(&account.name)?)?,
+            "--select",
+            "state:modified",
+            "--resource-type",
+            "test",
+            "--output",
+            "json",
+            "--output-keys",
+            "unique_id",
+        ],
+    )?;
+    selected.extend(manifest.model_dependencies(&unique_ids(&modified_tests)?));
+
+    let removed = production_manifest.removed_models(manifest);
+    selected.extend(
+        production_manifest
+            .descendants(&removed)
+            .into_iter()
+            .filter(|id| {
+                manifest
+                    .nodes
+                    .get(id)
+                    .is_some_and(|node| node.resource_type == "model")
+            }),
+    );
 
     for mapping in &config.external_changes {
         let matcher = Glob::new(&mapping.path)
@@ -483,7 +543,7 @@ pub fn select_models(
                 "unique_id",
             ],
         )?;
-        let allowed = unique_ids(&allowed_output);
+        let allowed = unique_ids(&allowed_output)?;
         selected.retain(|id| allowed.contains(id));
     }
     selected.retain(|id| {
@@ -495,17 +555,22 @@ pub fn select_models(
     Ok(selected)
 }
 
-fn unique_ids(output: &str) -> BTreeSet<String> {
-    output
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|value| {
-            value
-                .get("unique_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .collect()
+fn unique_ids(output: &str) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let value: Value = serde_json::from_str(line)
+            .with_context(|| format!("dbt ls returned invalid JSON: {}", truncate(line, 240)))?;
+        let id = value
+            .get("unique_id")
+            .and_then(Value::as_str)
+            .context("dbt ls JSON omitted unique_id")?;
+        ids.insert(id.to_owned());
+    }
+    Ok(ids)
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 pub fn build_models(
@@ -634,11 +699,7 @@ fn command_failure_message(output: &Output) -> String {
 
 pub fn ci_schema_name(prefix: &str, repo: &Path) -> Result<String> {
     let sha = git_output(repo, &["rev-parse", "--short=8", "HEAD"])?;
-    let random: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(6)
-        .map(char::from)
-        .collect();
+    let random = Uuid::new_v4().simple().to_string()[..16].to_owned();
     let timestamp = Utc::now().format("%Y%m%d%H%M%S");
     Ok(format!(
         "{}_{}_{}_{}",
@@ -869,6 +930,7 @@ mod tests {
             schema: "s".into(),
             alias: id.into(),
             fqn: vec!["test".into(), id.into()],
+            depends_on: DependsOn::default(),
             config: NodeConfig::default(),
         }
     }
@@ -891,6 +953,50 @@ mod tests {
             manifest.descendants(&BTreeSet::from(["a".into()])),
             BTreeSet::from(["a".into(), "b".into(), "c".into()])
         );
+    }
+
+    #[test]
+    fn removed_models_and_their_current_descendants_are_detected() {
+        let production = Manifest {
+            nodes: BTreeMap::from([
+                ("removed".into(), node("removed")),
+                ("downstream".into(), node("downstream")),
+            ]),
+            exposures: BTreeMap::new(),
+            child_map: BTreeMap::from([("removed".into(), vec!["downstream".into()])]),
+        };
+        let current = Manifest {
+            nodes: BTreeMap::from([("downstream".into(), node("downstream"))]),
+            exposures: BTreeMap::new(),
+            child_map: BTreeMap::new(),
+        };
+        let removed = production.removed_models(&current);
+        assert_eq!(removed, BTreeSet::from(["removed".into()]));
+        assert!(production.descendants(&removed).contains("downstream"));
+    }
+
+    #[test]
+    fn modified_tests_select_their_model_dependencies() {
+        let mut test = node("test.orders_not_null");
+        test.resource_type = "test".into();
+        test.depends_on.nodes = vec!["model.orders".into()];
+        let manifest = Manifest {
+            nodes: BTreeMap::from([
+                ("model.orders".into(), node("model.orders")),
+                ("test.orders_not_null".into(), test),
+            ]),
+            exposures: BTreeMap::new(),
+            child_map: BTreeMap::new(),
+        };
+        assert_eq!(
+            manifest.model_dependencies(&BTreeSet::from(["test.orders_not_null".into()])),
+            BTreeSet::from(["model.orders".into()])
+        );
+    }
+
+    #[test]
+    fn malformed_dbt_ls_output_is_not_silently_ignored() {
+        assert!(unique_ids("not-json").is_err());
     }
 
     #[test]

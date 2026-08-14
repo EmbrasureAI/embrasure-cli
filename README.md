@@ -49,7 +49,7 @@ Argument parsing errors use clap's conventional exit code `2` before a report ca
 ## Install
 
 ```sh
-cargo install --git https://github.com/EmbrasureAI/embrasure-check --tag v0.2.0 --locked
+cargo install --git https://github.com/EmbrasureAI/embrasure-check --tag v0.2.1 --locked
 ```
 
 ## Configure
@@ -103,6 +103,8 @@ If `dbt.state_dir` is omitted, the CLI creates a temporary detached Git worktree
 
 The JSON schema is versioned and arrays are sorted before serialization. The v1 contract is checked in at [`schemas/report-v1.schema.json`](schemas/report-v1.schema.json). Progress is written to stderr; `--json` reserves stdout for exactly one JSON document.
 
+Deleted models are findings by default and their base-revision descendants and exposures are still reported. After confirming an intentional deletion and its migration, acknowledge it explicitly with `models.<unique_id>.allow_removal: true`; downstream models are still rebuilt when they remain in the current project.
+
 An agent can use this loop:
 
 ```text
@@ -114,9 +116,9 @@ review until the command exits 0.
 
 ## Safety model
 
-The generated schema name contains the configured prefix, commit, timestamp, and random suffix. Only schemas carrying that complete prefix are eligible for cleanup. Custom `generate_schema_name` macros are supported when they retain the target schema prefix; the run stops before building if they do not. SQL API requests carry a query tag and explicit timeout; the generated dbt profile applies equivalent session parameters. A run also stops before building if selection exceeds `safety.max_models`.
+The generated schema name contains the configured prefix, commit, timestamp, and random suffix. Cleanup requires both the exact per-run schema namespace and a matching ownership marker stored on the schema. Custom `generate_schema_name` macros are supported when they retain the complete target schema; the run stops before building if they do not. SQL API requests carry a query tag and explicit timeout; the generated dbt profile applies equivalent session parameters. A run also stops before building if selection exceeds `safety.max_models`.
 
-Cleanup is attempted after every handled outcome. A cleanup failure changes the result to execution failure and prints the exact schema that an operator must remove. No process can clean up after `SIGKILL`, power loss, or a machine crash, so operators should also expire stale schemas by prefix as a backstop.
+Cleanup is attempted after every handled outcome, including Ctrl-C and normal CI termination signals. A cleanup failure changes the result to execution failure and prints the exact schema that an operator must remove. No process can clean up after `SIGKILL`, power loss, or a machine crash, so operators should also expire stale schemas by prefix as a backstop.
 
 Snowflake protocol details follow the official [SQL API reference](https://docs.snowflake.com/en/developer-guide/sql-api/reference) and [authentication guide](https://docs.snowflake.com/en/developer-guide/sql-api/authenticating).
 

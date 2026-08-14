@@ -78,7 +78,86 @@
         "ci_relation": { "type": "string" },
         "production_relation": { "type": ["string", "null"] },
         "dbt_build": { "enum": ["pending", "passed", "failed"] },
-        "comparison": { "type": ["object", "null"] }
+        "comparison": {
+          "anyOf": [
+            { "$ref": "#/$defs/model_comparison" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "model_comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ci_row_count", "production_row_count", "row_count_relative_change", "columns", "primary_key"],
+      "properties": {
+        "ci_row_count": { "type": "integer", "minimum": 0 },
+        "production_row_count": { "type": "integer", "minimum": 0 },
+        "row_count_relative_change": { "type": "number", "minimum": 0 },
+        "columns": { "type": "array", "items": { "$ref": "#/$defs/column_comparison" } },
+        "primary_key": {
+          "anyOf": [
+            { "$ref": "#/$defs/primary_key_comparison" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "column_comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "ci_type", "production_type", "ci", "production"],
+      "properties": {
+        "name": { "type": "string" },
+        "ci_type": { "type": ["string", "null"] },
+        "production_type": { "type": ["string", "null"] },
+        "ci": {
+          "anyOf": [
+            { "$ref": "#/$defs/column_metrics" },
+            { "type": "null" }
+          ]
+        },
+        "production": {
+          "anyOf": [
+            { "$ref": "#/$defs/column_metrics" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "column_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["null_count", "null_rate", "cardinality"],
+      "properties": {
+        "null_count": { "type": "integer", "minimum": 0 },
+        "null_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "cardinality": { "type": "integer", "minimum": 0 },
+        "min": { "type": "string" },
+        "max": { "type": "string" },
+        "average": { "type": "number" },
+        "p05": { "type": "number" },
+        "p50": { "type": "number" },
+        "p95": { "type": "number" }
+      }
+    },
+    "primary_key_comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns", "ci_only_count", "production_only_count", "ci_only_examples", "production_only_examples"],
+      "properties": {
+        "columns": { "type": "array", "items": { "type": "string" } },
+        "ci_only_count": { "type": "integer", "minimum": 0 },
+        "production_only_count": { "type": "integer", "minimum": 0 },
+        "ci_only_examples": { "$ref": "#/$defs/key_examples" },
+        "production_only_examples": { "$ref": "#/$defs/key_examples" }
+      }
+    },
+    "key_examples": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": { "type": ["string", "null"] }
       }
     },
     "finding": {

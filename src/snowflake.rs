@@ -18,7 +18,7 @@ use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use crate::{
@@ -111,22 +111,31 @@ impl SnowflakeClient {
     }
 
     pub async fn execute(&self, statement: &str) -> Result<QueryResult> {
-        let request_id = Uuid::new_v4();
-        let response = self
-            .http
-            .post(&self.endpoint)
-            .query(&[("requestId", request_id.to_string())])
-            .headers(self.headers()?)
-            .json(&statement_body(
-                statement,
-                &self.account,
-                &self.query_tag,
-                self.timeout_seconds,
-            ))
-            .send()
-            .await
-            .context("Snowflake SQL API request failed")?;
-        self.consume_response(response, request_id).await
+        timeout(Duration::from_secs(self.timeout_seconds + 30), async {
+            let request_id = Uuid::new_v4();
+            let response = self
+                .http
+                .post(&self.endpoint)
+                .query(&[("requestId", request_id.to_string())])
+                .headers(self.headers()?)
+                .json(&statement_body(
+                    statement,
+                    &self.account,
+                    &self.query_tag,
+                    self.timeout_seconds,
+                ))
+                .send()
+                .await
+                .context("Snowflake SQL API request failed")?;
+            self.consume_response(response, request_id).await
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "Snowflake SQL API request exceeded {} seconds",
+                self.timeout_seconds + 30
+            )
+        })?
     }
 
     async fn consume_response(
@@ -218,28 +227,56 @@ impl SnowflakeClient {
         }
     }
 
-    pub async fn create_schema(&self, schema: &str) -> Result<()> {
+    pub async fn create_schema(&self, database: &str, schema: &str) -> Result<()> {
         self.execute(&format!(
-            "CREATE TRANSIENT SCHEMA IF NOT EXISTS {}.{} COMMENT = 'Temporary schema managed by embrasure-check'",
-            quote_identifier(&self.account.database), quote_identifier(schema),
-        )).await?;
+            "CREATE TRANSIENT SCHEMA {}.{} COMMENT = {}",
+            quote_identifier(database),
+            quote_identifier(schema),
+            quote_string(&self.schema_ownership_marker()),
+        ))
+        .await?;
         Ok(())
     }
 
-    pub async fn drop_schema(&self, schema: &str, expected_prefix: &str) -> Result<()> {
-        let prefix = format!("{}_", expected_prefix.to_ascii_uppercase());
-        if !schema.to_ascii_uppercase().starts_with(&prefix) {
+    pub async fn drop_schema(&self, database: &str, schema: &str, run_schema: &str) -> Result<()> {
+        if !is_managed_schema(schema, run_schema) {
+            bail!("refusing to drop schema {schema}: it is not owned by this run ({run_schema})");
+        }
+        let ownership = self
+            .execute(&format!(
+                "SELECT COMMENT FROM {}.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = {}",
+                quote_identifier(database),
+                quote_string(schema),
+            ))
+            .await?;
+        let Some(comment) = ownership
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(Option::as_deref)
+        else {
+            return Ok(());
+        };
+        let expected = self.schema_ownership_marker();
+        if comment != expected {
             bail!(
-                "refusing to drop schema {schema}: it does not start with safety prefix {expected_prefix}_"
+                "refusing to drop schema {database}.{schema}: its ownership marker does not match this run"
             );
         }
         self.execute(&format!(
             "DROP SCHEMA IF EXISTS {}.{}",
-            quote_identifier(&self.account.database),
+            quote_identifier(database),
             quote_identifier(schema),
         ))
         .await?;
         Ok(())
+    }
+
+    fn schema_ownership_marker(&self) -> String {
+        format!(
+            "Temporary schema managed by embrasure-check; {}",
+            self.query_tag
+        )
     }
 
     fn headers(&self) -> Result<header::HeaderMap> {
@@ -404,6 +441,16 @@ pub fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+fn quote_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+pub fn is_managed_schema(schema: &str, run_schema: &str) -> bool {
+    let schema = schema.to_ascii_uppercase();
+    let run_schema = run_schema.to_ascii_uppercase();
+    schema == run_schema || schema.starts_with(&format!("{run_schema}_"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,6 +460,7 @@ mod tests {
     #[test]
     fn identifiers_are_always_quoted() {
         assert_eq!(quote_identifier("odd\"name"), "\"odd\"\"name\"");
+        assert_eq!(quote_string("run's marker"), "'run''s marker'");
         assert_eq!(
             Relation {
                 database: "D".into(),
@@ -422,6 +470,18 @@ mod tests {
             .sql(),
             "\"D\".\"S\".\"T\""
         );
+    }
+
+    #[test]
+    fn cleanup_is_limited_to_the_exact_run_namespace() {
+        let run = "EMBRASURE_CHECK_SHA_TIME_RANDOM";
+        assert!(is_managed_schema(run, run));
+        assert!(is_managed_schema(
+            "EMBRASURE_CHECK_SHA_TIME_RANDOM_MARKETING",
+            run
+        ));
+        assert!(!is_managed_schema("EMBRASURE_CHECK_PROD", run));
+        assert!(!is_managed_schema("EMBRASURE_CHECK_SHA_TIME_RANDOMLY", run));
     }
 
     #[test]

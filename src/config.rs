@@ -142,6 +142,8 @@ pub enum AuthConfig {
 pub struct ModelConfig {
     #[serde(default)]
     pub primary_key: Vec<String>,
+    #[serde(default)]
+    pub allow_removal: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -151,7 +153,7 @@ pub struct ExternalChange {
     pub models: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct CrossAccountDependency {
     pub from: String,
@@ -187,6 +189,9 @@ impl Config {
         }
         if self.dbt.profile.trim().is_empty() || self.dbt.command.trim().is_empty() {
             bail!("dbt profile and command must not be empty");
+        }
+        if self.dbt.threads == 0 {
+            bail!("dbt.threads must be greater than zero");
         }
         if self.accounts.len() > 1
             && self
@@ -225,6 +230,16 @@ impl Config {
         }
         let mut account_names = BTreeSet::new();
         for account in &self.accounts {
+            if account.name.len() > 64
+                || !account.name.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                })
+            {
+                bail!(
+                    "account name {} must be 1-64 letters, numbers, hyphens, or underscores",
+                    account.name
+                );
+            }
             if !account_names.insert(account.name.to_ascii_lowercase()) {
                 bail!("Snowflake account names must be unique");
             }
@@ -241,12 +256,20 @@ impl Config {
                     bail!("account {} has an empty {field}", account.name);
                 }
             }
-            if !account.account.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-            }) || account.account.contains("..")
+            if account.account.len() > 255
+                || account.account.starts_with(['.', '-'])
+                || account.account.ends_with(['.', '-'])
+                || account
+                    .account
+                    .to_ascii_lowercase()
+                    .ends_with(".snowflakecomputing.com")
+                || !account.account.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+                })
+                || account.account.contains("..")
             {
                 bail!(
-                    "account identifier {} contains invalid characters",
+                    "account identifier {} is invalid; use the identifier only, without https:// or .snowflakecomputing.com",
                     account.account
                 );
             }
@@ -281,6 +304,15 @@ impl Config {
                 }
             }
         }
+        if let Some(metabase) = &self.metabase {
+            let url = url::Url::parse(&metabase.url).context("metabase.url is invalid")?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                bail!("metabase.url must be an absolute http or https URL");
+            }
+            if metabase.api_key_env.trim().is_empty() {
+                bail!("metabase.api_key_env must not be empty");
+            }
+        }
         Ok(())
     }
 
@@ -295,7 +327,12 @@ impl Config {
                 private_key_path, ..
             } = &mut account.auth
             {
-                *private_key_path = expand_home(private_key_path)?;
+                let expanded = expand_home(private_key_path)?;
+                *private_key_path = if expanded.is_absolute() {
+                    expanded
+                } else {
+                    root.join(expanded)
+                };
             }
         }
         Ok(())
@@ -436,5 +473,66 @@ accounts:
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_account_names_that_can_escape_temporary_paths() {
+        let yaml = r#"
+version: 1
+accounts:
+  - name: ../../outside
+    account: org-account
+    user: ci
+    role: ci
+    database: analytics
+    warehouse: ci
+    production_schema: prod
+    auth: { type: oauth, token_env: TOKEN }
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("account name")
+        );
+    }
+
+    #[test]
+    fn key_paths_are_relative_to_the_config_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config/embrasure-check.yml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(directory.path().join("project")).unwrap();
+        fs::write(
+            &config_path,
+            r#"
+version: 1
+dbt: { project_dir: ../project }
+accounts:
+  - name: one
+    account: org-account
+    user: ci
+    role: ci
+    database: analytics
+    warehouse: ci
+    production_schema: prod
+    auth: { type: key_pair, private_key_path: secrets/key.p8 }
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load(&config_path).unwrap();
+        config.resolve_from(&config_path).unwrap();
+        let AuthConfig::KeyPair {
+            private_key_path, ..
+        } = &config.accounts[0].auth
+        else {
+            panic!("expected key-pair auth");
+        };
+        assert_eq!(
+            private_key_path,
+            &directory.path().join("config/secrets/key.p8")
+        );
     }
 }

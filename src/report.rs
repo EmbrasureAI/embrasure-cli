@@ -177,15 +177,16 @@ impl Report {
             dependency.columns.sort();
             dependency.columns.dedup();
         }
-        self.impact.cross_account_dependencies.sort_by(|a, b| {
-            a.from
-                .cmp(&b.from)
-                .then(a.to.cmp(&b.to))
-                .then(a.columns.cmp(&b.columns))
-        });
+        self.impact.cross_account_dependencies.sort();
+        self.impact.cross_account_dependencies.dedup();
         self.execution_errors.sort();
         self.execution_errors.dedup();
-        self.ci_schemas.sort_by(|a, b| a.account.cmp(&b.account));
+        self.ci_schemas.sort_by(|a, b| {
+            a.account
+                .cmp(&b.account)
+                .then(a.database.cmp(&b.database))
+                .then(a.schema.cmp(&b.schema))
+        });
 
         self.summary.models_selected = self.models.len();
         self.summary.models_built = self

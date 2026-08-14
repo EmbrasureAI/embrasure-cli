@@ -10,10 +10,16 @@ use crate::{
     dbt::{self, DbtContext, ManifestNode},
     metabase,
     report::{CiSchema, CoverageGap, Finding, ModelReport, Report},
-    snowflake::{Relation, SnowflakeClient},
+    snowflake::{Relation, SnowflakeClient, is_managed_schema},
 };
 
 pub async fn run_check(config_path: &Path, base: &str) -> Report {
+    if base.trim().is_empty() || base.starts_with('-') {
+        return error_report(
+            base,
+            anyhow::anyhow!("--base must be a non-empty Git revision and must not start with '-'"),
+        );
+    }
     let mut config = match Config::load(config_path) {
         Ok(config) => config,
         Err(error) => return error_report(base, error),
@@ -42,49 +48,78 @@ async fn execute(config: &Config, base: &str, report: &mut Report) -> Result<()>
     );
     let mut clients = Vec::new();
 
-    let main_result = async {
-        for account in &config.accounts {
-            let client = SnowflakeClient::new(
-                account,
-                resolved_auth
-                    .get(&account.name)
-                    .context("resolved Snowflake credential was not retained")?,
-                query_tag.clone(),
-                config.safety.statement_timeout_seconds,
-            )
-            .with_context(|| format!("could not initialize Snowflake account {}", account.name))?;
-            clients.push(client);
-            report.ci_schemas.push(CiSchema {
-                account: account.name.clone(),
-                database: account.database.clone(),
-                schema: schema.clone(),
-                cleaned_up: false,
-            });
-            clients
-                .last()
-                .context("internal error: Snowflake client was not retained for cleanup")?
-                .create_schema(&schema)
-                .await
+    let main_result = {
+        let main = async {
+            for account in &config.accounts {
+                let client = SnowflakeClient::new(
+                    account,
+                    resolved_auth
+                        .get(&account.name)
+                        .context("resolved Snowflake credential was not retained")?,
+                    query_tag.clone(),
+                    config.safety.statement_timeout_seconds,
+                )
                 .with_context(|| {
-                    format!("could not create CI schema for account {}", account.name)
+                    format!("could not initialize Snowflake account {}", account.name)
                 })?;
-        }
+                clients.push(client);
+                report.ci_schemas.push(CiSchema {
+                    account: account.name.clone(),
+                    database: account.database.clone(),
+                    schema: schema.clone(),
+                    cleaned_up: false,
+                });
+                clients
+                    .last()
+                    .context("internal error: Snowflake client was not retained for cleanup")?
+                    .create_schema(&account.database, &schema)
+                    .await
+                    .with_context(|| {
+                        format!("could not create CI schema for account {}", account.name)
+                    })?;
+            }
 
-        let mut context = dbt::prepare(config, &resolved_auth, base, &schema, &query_tag)?;
-        let result = execute_with_dbt(config, &mut context, &clients, report).await;
-        if let Err(error) = context.cleanup_worktree() {
-            report
-                .execution_errors
-                .push(format!("temporary Git worktree cleanup failed: {error:#}"));
+            let mut context = dbt::prepare(config, &resolved_auth, base, &schema, &query_tag)?;
+            let result = execute_with_dbt(config, &mut context, &clients, &schema, report).await;
+            if let Err(error) = context.cleanup_worktree() {
+                report
+                    .execution_errors
+                    .push(format!("temporary Git worktree cleanup failed: {error:#}"));
+            }
+            result
+        };
+        tokio::pin!(main);
+        tokio::select! {
+            result = &mut main => result,
+            result = termination_signal() => {
+                result?;
+                Err(anyhow::anyhow!("received a termination signal; validation stopped and cleanup was attempted"))
+            }
         }
-        result
-    }
-    .await;
+    };
 
     if let Err(error) = main_result {
         report.execution_errors.push(format_error(&error));
     }
-    cleanup_schemas(config, &clients, report).await;
+    cleanup_schemas(config, &clients, &schema, report).await;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn termination_signal() -> Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result?,
+        _ = terminate.recv() => {},
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn termination_signal() -> Result<()> {
+    tokio::signal::ctrl_c().await?;
     Ok(())
 }
 
@@ -92,12 +127,38 @@ async fn execute_with_dbt(
     config: &Config,
     context: &mut DbtContext,
     clients: &[SnowflakeClient],
+    ci_schema: &str,
     report: &mut Report,
 ) -> Result<()> {
     let changed_paths = context.changed_paths(&report.base)?;
     let mut selected_by_account = Vec::new();
     let mut all_selected = BTreeSet::new();
+    let mut removed_production_relations = Vec::new();
     for account in &config.accounts {
+        let manifest = context.manifest(&account.name)?;
+        let production_manifest = context.production_manifest(&account.name)?;
+        let removed = production_manifest.removed_models(manifest);
+        all_selected.extend(removed.iter().cloned());
+        let removal_impact = production_manifest.impact(&removed);
+        report.impact.dbt_models.extend(removal_impact.dbt_models);
+        report
+            .impact
+            .dbt_exposures
+            .extend(removal_impact.dbt_exposures);
+        for model in &removed {
+            let production_node = &production_manifest.nodes[model];
+            removed_production_relations.push((
+                model.clone(),
+                relation_for(production_node, &account.database, &production_node.schema),
+            ));
+            if !model_config(config, model, &production_node.name).allow_removal {
+                report.findings.push(Finding {
+                    check: "model_removed".into(),
+                    model: model.clone(),
+                    message: "dbt model exists at the base revision but is absent from the current manifest; set models.<unique_id>.allow_removal only after confirming the deletion and downstream migration".into(),
+                });
+            }
+        }
         let selected = dbt::select_models(config, context, account, &changed_paths)
             .with_context(|| format!("could not select dbt models for account {}", account.name))?;
         all_selected.extend(selected.iter().cloned());
@@ -117,31 +178,37 @@ async fn execute_with_dbt(
         let derived_schemas = selected
             .iter()
             .filter_map(|id| manifest.nodes.get(id))
-            .map(|node| node.schema.clone())
+            .map(|node| {
+                (
+                    snowflake_identifier(
+                        node.database.as_deref().unwrap_or(&account.database),
+                        node.config.quoting.database,
+                    ),
+                    snowflake_identifier(&node.schema, node.config.quoting.schema),
+                )
+            })
             .collect::<BTreeSet<_>>();
-        for derived_schema in derived_schemas {
-            let safe_prefix = format!("{}_", config.safety.schema_prefix.to_ascii_uppercase());
-            if !derived_schema
-                .to_ascii_uppercase()
-                .starts_with(&safe_prefix)
-            {
+        for (derived_database, derived_schema) in derived_schemas {
+            if !is_managed_schema(&derived_schema, ci_schema) {
                 bail!(
-                    "dbt generated schema {derived_schema} outside the managed prefix {safe_prefix}; update generate_schema_name so CI schemas retain the target schema prefix"
+                    "dbt generated schema {derived_schema} outside this run's namespace {ci_schema}; update generate_schema_name so derived schemas retain the complete target schema"
                 );
             }
             if report.ci_schemas.iter().any(|item| {
-                item.account == account.name && item.schema.eq_ignore_ascii_case(&derived_schema)
+                item.account == account.name
+                    && item.database.eq_ignore_ascii_case(&derived_database)
+                    && item.schema.eq_ignore_ascii_case(&derived_schema)
             }) {
                 continue;
             }
             report.ci_schemas.push(CiSchema {
                 account: account.name.clone(),
-                database: account.database.clone(),
+                database: derived_database.clone(),
                 schema: derived_schema.clone(),
                 cleaned_up: false,
             });
             clients[index]
-                .create_schema(&derived_schema)
+                .create_schema(&derived_database, &derived_schema)
                 .await
                 .with_context(|| {
                     format!(
@@ -178,7 +245,7 @@ async fn execute_with_dbt(
             });
         }
     }
-    let mut production_relations = vec![];
+    let mut production_relations = removed_production_relations;
     for (index, (account, selected)) in config.accounts.iter().zip(&selected_by_account).enumerate()
     {
         let manifest = context.manifest(&account.name)?;
@@ -282,7 +349,12 @@ async fn execute_with_dbt(
     Ok(())
 }
 
-async fn cleanup_schemas(config: &Config, clients: &[SnowflakeClient], report: &mut Report) {
+async fn cleanup_schemas(
+    config: &Config,
+    clients: &[SnowflakeClient],
+    run_schema: &str,
+    report: &mut Report,
+) {
     let cleanup_targets = report
         .ci_schemas
         .iter()
@@ -308,7 +380,7 @@ async fn cleanup_schemas(config: &Config, clients: &[SnowflakeClient], report: &
             continue;
         };
         match clients[account_index]
-            .drop_schema(&target_schema, &config.safety.schema_prefix)
+            .drop_schema(&database, &target_schema, run_schema)
             .await
         {
             Ok(()) => {
@@ -353,6 +425,7 @@ fn model_config<'a>(config: &'a Config, id: &str, name: &str) -> &'a ModelConfig
 
 static EMPTY_MODEL_CONFIG: ModelConfig = ModelConfig {
     primary_key: vec![],
+    allow_removal: false,
 };
 
 fn find_model_mut<'a>(
@@ -380,7 +453,7 @@ fn format_error(error: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dbt::{ManifestNode, NodeConfig, QuotePolicy};
+    use crate::dbt::{DependsOn, ManifestNode, NodeConfig, QuotePolicy};
 
     #[test]
     fn ci_relation_never_uses_production_schema() {
@@ -392,9 +465,17 @@ mod tests {
             schema: "PROD".into(),
             alias: "Y".into(),
             fqn: vec!["x".into(), "y".into()],
+            depends_on: DependsOn::default(),
             config: NodeConfig::default(),
         };
         assert_eq!(relation_for(&node, "OTHER", "CHECK").schema, "CHECK");
+    }
+
+    #[tokio::test]
+    async fn git_revisions_cannot_be_parsed_as_options() {
+        let report = run_check(Path::new("unused.yml"), "--help").await;
+        assert_eq!(report.status, crate::report::Status::ExecutionFailure);
+        assert!(report.execution_errors[0].contains("must not start"));
     }
 
     #[test]
@@ -407,6 +488,7 @@ mod tests {
             schema: "prod".into(),
             alias: "orders".into(),
             fqn: vec!["x".into(), "orders".into()],
+            depends_on: DependsOn::default(),
             config: NodeConfig::default(),
         };
 
@@ -426,6 +508,7 @@ mod tests {
             schema: "Prod".into(),
             alias: "OrderLines".into(),
             fqn: vec!["x".into(), "orders".into()],
+            depends_on: DependsOn::default(),
             config: NodeConfig {
                 quoting: QuotePolicy {
                     database: Some(true),

@@ -446,9 +446,13 @@ fn parse_u64(value: Option<&str>) -> Result<u64> {
 fn parse_optional_f64(value: Option<&str>) -> Result<Option<f64>> {
     value
         .map(|value| {
-            value
+            let parsed: f64 = value
                 .parse()
-                .context("Snowflake returned an invalid numeric metric")
+                .context("Snowflake returned an invalid numeric metric")?;
+            if !parsed.is_finite() {
+                bail!("Snowflake returned a non-finite numeric metric: {value}");
+            }
+            Ok(parsed)
         })
         .transpose()
 }
@@ -470,5 +474,11 @@ mod tests {
         assert_eq!(relative_change(0.0, 0.0), 0.0);
         assert_eq!(relative_change(1.0, 0.0), 1.0);
         assert_eq!(relative_change(90.0, 100.0), 0.1);
+    }
+
+    #[test]
+    fn non_finite_metrics_cannot_break_json_output() {
+        assert!(parse_optional_f64(Some("NaN")).is_err());
+        assert!(parse_optional_f64(Some("inf")).is_err());
     }
 }

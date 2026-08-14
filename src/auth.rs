@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     time::timeout,
 };
 use url::Url;
@@ -82,14 +82,11 @@ pub async fn resolve(account: &AccountConfig) -> Result<ResolvedAuth> {
             Ok(ResolvedAuth::OAuth { token })
         }
         AuthConfig::Oauth { token_env } => Ok(ResolvedAuth::OAuth {
-            token: env::var(token_env)
-                .with_context(|| format!("missing OAuth token environment variable {token_env}"))?,
+            token: required_env(token_env, "OAuth token")?,
         }),
         AuthConfig::ProgrammaticAccessToken { token_env } => {
             Ok(ResolvedAuth::ProgrammaticAccessToken {
-                token: env::var(token_env).with_context(|| {
-                    format!("missing Snowflake PAT environment variable {token_env}")
-                })?,
+                token: required_env(token_env, "Snowflake PAT")?,
             })
         }
         AuthConfig::KeyPair {
@@ -99,11 +96,7 @@ pub async fn resolve(account: &AccountConfig) -> Result<ResolvedAuth> {
             private_key_path: private_key_path.clone(),
             passphrase: passphrase_env
                 .as_ref()
-                .map(|name| {
-                    env::var(name).with_context(|| {
-                        format!("missing key passphrase environment variable {name}")
-                    })
-                })
+                .map(|name| required_env(name, "key passphrase"))
                 .transpose()?,
         }),
     }
@@ -171,7 +164,7 @@ pub fn status(account: &AccountConfig) -> Result<AuthStatus> {
         } => {
             let passphrase_ready = passphrase_env
                 .as_ref()
-                .is_none_or(|name| env::var_os(name).is_some());
+                .is_none_or(|name| env::var(name).is_ok_and(|value| !value.trim().is_empty()));
             let ready = private_key_path.is_file() && passphrase_ready;
             let message = if !private_key_path.is_file() {
                 format!("key file is missing: {}", private_key_path.display())
@@ -195,11 +188,20 @@ pub fn status(account: &AccountConfig) -> Result<AuthStatus> {
 }
 
 fn env_status(method: &'static str, name: &str) -> (&'static str, bool, String) {
-    if env::var_os(name).is_some() {
-        (method, true, format!("{name} is set"))
-    } else {
-        (method, false, format!("{name} is missing"))
+    match env::var(name) {
+        Ok(value) if !value.trim().is_empty() => (method, true, format!("{name} is set")),
+        Ok(_) => (method, false, format!("{name} is empty")),
+        Err(_) => (method, false, format!("{name} is missing")),
     }
+}
+
+fn required_env(name: &str, label: &str) -> Result<String> {
+    let value =
+        env::var(name).with_context(|| format!("missing {label} environment variable {name}"))?;
+    if value.trim().is_empty() {
+        bail!("{label} environment variable {name} is empty");
+    }
+    Ok(value)
 }
 
 fn select_account<'a>(config: &'a Config, requested: Option<&str>) -> Result<&'a AccountConfig> {
@@ -250,9 +252,10 @@ async fn login(account: &AccountConfig) -> Result<String> {
     let (mut stream, _) = timeout(Duration::from_secs(300), listener.accept())
         .await
         .context("Snowflake browser login timed out after 5 minutes")??;
-    let mut request = vec![0_u8; 8192];
-    let length = stream.read(&mut request).await?;
-    let request = String::from_utf8_lossy(&request[..length]);
+    let request = timeout(Duration::from_secs(10), read_http_request(&mut stream))
+        .await
+        .context("Snowflake OAuth callback did not finish sending its request")??;
+    let request = String::from_utf8_lossy(&request);
     let target = request
         .lines()
         .next()
@@ -274,7 +277,7 @@ async fn login(account: &AccountConfig) -> Result<String> {
     let (status, message) = if outcome.is_ok() {
         (
             "200 OK",
-            "Snowflake sign-in complete. You can close this tab.",
+            "Authorization received. Return to the terminal to finish sign-in.",
         )
     } else {
         (
@@ -304,6 +307,29 @@ async fn login(account: &AccountConfig) -> Result<String> {
     Ok(token.access_token)
 }
 
+async fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    const MAX_REQUEST_BYTES: usize = 16 * 1024;
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let length = stream.read(&mut buffer).await?;
+        if length == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..length]);
+        if request.len() > MAX_REQUEST_BYTES {
+            bail!("Snowflake OAuth callback exceeded {MAX_REQUEST_BYTES} bytes");
+        }
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    if request.is_empty() {
+        bail!("Snowflake OAuth callback closed without a request");
+    }
+    Ok(request)
+}
+
 async fn load_or_refresh_local_token(account: &AccountConfig) -> Result<String> {
     let cached = load_cached(account)?;
     if cached.expires_at > now()? + 30 {
@@ -331,7 +357,9 @@ async fn load_or_refresh_local_token(account: &AccountConfig) -> Result<String> 
 }
 
 async fn token_request(account: &AccountConfig, form: &[(&str, &str)]) -> Result<TokenResponse> {
-    let response = Client::new()
+    let response = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?
         .post(format!(
             "https://{}/oauth/token-request",
             account_host(&account.account)
