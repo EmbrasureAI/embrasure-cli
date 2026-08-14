@@ -49,7 +49,7 @@ Argument parsing errors use clap's conventional exit code `2` before a report ca
 ## Install
 
 ```sh
-cargo install --git https://github.com/EmbrasureAI/embrasure-check
+cargo install --git https://github.com/EmbrasureAI/embrasure-check --tag v0.1.0 --locked
 ```
 
 ## Configure
