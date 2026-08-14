@@ -35,6 +35,22 @@ pub struct ManifestNode {
     pub database: Option<String>,
     pub schema: String,
     pub alias: String,
+    pub fqn: Vec<String>,
+    #[serde(default)]
+    pub config: NodeConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NodeConfig {
+    #[serde(default)]
+    pub quoting: QuotePolicy,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct QuotePolicy {
+    pub database: Option<bool>,
+    pub schema: Option<bool>,
+    pub identifier: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -511,7 +527,14 @@ pub fn build_models(
         path_str(&target_path)?.to_owned(),
         "--select".to_owned(),
     ];
-    owned.extend(selected.iter().cloned());
+    let manifest = context.manifest(&account.name)?;
+    for id in selected {
+        let node = manifest
+            .nodes
+            .get(id)
+            .with_context(|| format!("selected dbt model {id} is absent from current manifest"))?;
+        owned.push(dbt_selector(node)?);
+    }
     let args = owned.iter().map(String::as_str).collect::<Vec<_>>();
     let output = dbt_process(
         config,
@@ -536,6 +559,13 @@ pub fn build_models(
         passed: false,
         failures,
     })
+}
+
+fn dbt_selector(node: &ManifestNode) -> Result<String> {
+    if node.fqn.is_empty() {
+        bail!("dbt model {} has an empty fqn", node.unique_id);
+    }
+    Ok(format!("fqn:{}", node.fqn.join(".")))
 }
 
 fn load_run_failures(path: &Path) -> Result<Vec<BuildFailure>> {
@@ -833,6 +863,8 @@ mod tests {
             database: None,
             schema: "s".into(),
             alias: id.into(),
+            fqn: vec!["test".into(), id.into()],
+            config: NodeConfig::default(),
         }
     }
 
@@ -854,6 +886,11 @@ mod tests {
             manifest.descendants(&BTreeSet::from(["a".into()])),
             BTreeSet::from(["a".into(), "b".into(), "c".into()])
         );
+    }
+
+    #[test]
+    fn build_selector_uses_the_manifest_fqn() {
+        assert_eq!(dbt_selector(&node("orders")).unwrap(), "fqn:test.orders");
     }
 
     #[test]

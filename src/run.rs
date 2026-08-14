@@ -181,18 +181,10 @@ async fn execute_with_dbt(
                 format!("selected dbt model {id} is absent from current manifest")
             })?;
             let ci_relation = relation_for(node, &account.database, &node.schema);
-            let production_relation =
-                production_manifest
-                    .nodes
-                    .get(id)
-                    .map(|production| Relation {
-                        database: production
-                            .database
-                            .clone()
-                            .unwrap_or_else(|| account.database.clone()),
-                        schema: production.schema.clone(),
-                        identifier: production.alias.clone(),
-                    });
+            let production_relation = production_manifest
+                .nodes
+                .get(id)
+                .map(|production| relation_for(production, &account.database, &production.schema));
             production_relations.push((
                 id.clone(),
                 production_relation.clone().unwrap_or_else(|| {
@@ -246,14 +238,8 @@ async fn execute_with_dbt(
                 continue;
             };
             let ci_relation = relation_for(node, &account.database, &node.schema);
-            let production_relation = Relation {
-                database: production_node
-                    .database
-                    .clone()
-                    .unwrap_or_else(|| account.database.clone()),
-                schema: production_node.schema.clone(),
-                identifier: production_node.alias.clone(),
-            };
+            let production_relation =
+                relation_for(production_node, &account.database, &production_node.schema);
             let model_config = model_config(config, id, &node.name);
             let (comparison, findings) = compare_model(
                 &clients[index],
@@ -333,12 +319,20 @@ async fn cleanup_schemas(config: &Config, clients: &[SnowflakeClient], report: &
 
 fn relation_for(node: &ManifestNode, default_database: &str, schema: &str) -> Relation {
     Relation {
-        database: node
-            .database
-            .clone()
-            .unwrap_or_else(|| default_database.to_owned()),
-        schema: schema.to_owned(),
-        identifier: node.alias.clone(),
+        database: snowflake_identifier(
+            node.database.as_deref().unwrap_or(default_database),
+            node.config.quoting.database,
+        ),
+        schema: snowflake_identifier(schema, node.config.quoting.schema),
+        identifier: snowflake_identifier(&node.alias, node.config.quoting.identifier),
+    }
+}
+
+fn snowflake_identifier(value: &str, quoted: Option<bool>) -> String {
+    if quoted.unwrap_or(false) {
+        value.to_owned()
+    } else {
+        value.to_ascii_uppercase()
     }
 }
 
@@ -379,7 +373,7 @@ fn format_error(error: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dbt::ManifestNode;
+    use crate::dbt::{ManifestNode, NodeConfig, QuotePolicy};
 
     #[test]
     fn ci_relation_never_uses_production_schema() {
@@ -390,7 +384,53 @@ mod tests {
             database: Some("D".into()),
             schema: "PROD".into(),
             alias: "Y".into(),
+            fqn: vec!["x".into(), "y".into()],
+            config: NodeConfig::default(),
         };
         assert_eq!(relation_for(&node, "OTHER", "CHECK").schema, "CHECK");
+    }
+
+    #[test]
+    fn relation_uses_snowflake_case_for_unquoted_dbt_identifiers() {
+        let node = ManifestNode {
+            unique_id: "model.x.orders".into(),
+            name: "orders".into(),
+            resource_type: "model".into(),
+            database: Some("analytics".into()),
+            schema: "prod".into(),
+            alias: "orders".into(),
+            fqn: vec!["x".into(), "orders".into()],
+            config: NodeConfig::default(),
+        };
+
+        assert_eq!(
+            relation_for(&node, "other", "ci_schema").sql(),
+            "\"ANALYTICS\".\"CI_SCHEMA\".\"ORDERS\""
+        );
+    }
+
+    #[test]
+    fn relation_preserves_explicitly_quoted_dbt_identifiers() {
+        let node = ManifestNode {
+            unique_id: "model.x.orders".into(),
+            name: "orders".into(),
+            resource_type: "model".into(),
+            database: Some("Analytics".into()),
+            schema: "Prod".into(),
+            alias: "OrderLines".into(),
+            fqn: vec!["x".into(), "orders".into()],
+            config: NodeConfig {
+                quoting: QuotePolicy {
+                    database: Some(true),
+                    schema: Some(true),
+                    identifier: Some(true),
+                },
+            },
+        };
+
+        assert_eq!(
+            relation_for(&node, "other", "CiSchema").sql(),
+            "\"Analytics\".\"CiSchema\".\"OrderLines\""
+        );
     }
 }
