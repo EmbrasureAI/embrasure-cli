@@ -20,6 +20,14 @@ comparison:
   concurrency: 4
   timeout_seconds: 900
 
+validation:
+  # critical is the default. Use all for complete downstream validation or none
+  # for changed models only. Full downstream impact is always reported.
+  downstream: critical
+  critical_tags: [critical]
+  # Existing incremental models start from zero-copy production clones.
+  incremental_mode: clone
+
 thresholds:
   row_count_relative: 0.001
   null_rate_absolute: 0.001
@@ -57,6 +65,13 @@ models:
   # Keys may be dbt unique IDs or model names.
   model.orders:
     primary_key: [order_id]
+    # Fail if CI has any duplicate or null keys, even when production already does.
+    # key_policy: strict
+    # Select this model as a critical downstream target without adding a dbt tag.
+    # critical: true
+    # Override only the thresholds that are intentionally different for this model.
+    # thresholds:
+    #   row_count_relative: 0.05
     # Optional: limit both CI and production scans for a large fact table.
     # where: "order_date >= DATEADD(day, -30, CURRENT_DATE)"
     # Set this only for an intentional deletion after checking reported impact.

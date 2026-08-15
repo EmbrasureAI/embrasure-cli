@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/EmbrasureAI/embrasure-cli/schemas/report-v2.schema.json",
+  "title": "Embrasure check report v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "exit_code", "base", "ci_schemas", "thresholds",
+    "summary", "validation_scope", "models", "impact", "findings", "coverage_gaps",
+    "notices", "execution_errors"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "status": { "enum": ["pass", "findings", "incomplete", "execution_failure"] },
+    "exit_code": { "enum": [0, 1, 2, 3] },
+    "base": { "type": "string" },
+    "ci_schemas": { "type": "array", "items": { "$ref": "#/$defs/ci_schema" } },
+    "thresholds": { "$ref": "#/$defs/thresholds" },
+    "summary": { "$ref": "#/$defs/summary" },
+    "validation_scope": { "$ref": "#/$defs/validation_scope" },
+    "models": { "type": "array", "items": { "$ref": "#/$defs/model" } },
+    "impact": { "$ref": "#/$defs/impact" },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "coverage_gaps": { "type": "array", "items": { "$ref": "#/$defs/coverage_gap" } },
+    "notices": { "type": "array", "items": { "$ref": "#/$defs/notice" } },
+    "execution_errors": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "ci_schema": {
+      "type": "object", "additionalProperties": false,
+      "required": ["account", "database", "schema", "cleaned_up"],
+      "properties": {
+        "account": { "type": "string" }, "database": { "type": "string" },
+        "schema": { "type": "string" }, "cleaned_up": { "type": "boolean" }
+      }
+    },
+    "thresholds": {
+      "type": "object", "additionalProperties": false,
+      "required": ["row_count_relative", "null_rate_absolute", "cardinality_relative", "numeric_relative"],
+      "properties": {
+        "row_count_relative": { "type": "number", "minimum": 0 },
+        "null_rate_absolute": { "type": "number", "minimum": 0 },
+        "cardinality_relative": { "type": "number", "minimum": 0 },
+        "numeric_relative": { "type": "number", "minimum": 0 }
+      }
+    },
+    "summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["models_selected", "models_built", "models_compared", "findings", "coverage_gaps"],
+      "properties": {
+        "models_selected": { "type": "integer", "minimum": 0 },
+        "models_built": { "type": "integer", "minimum": 0 },
+        "models_compared": { "type": "integer", "minimum": 0 },
+        "findings": { "type": "integer", "minimum": 0 },
+        "coverage_gaps": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "validation_scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["downstream", "impacted_models", "requested_models", "validated_models", "skipped_models"],
+      "properties": {
+        "downstream": { "enum": ["none", "critical", "all"] },
+        "impacted_models": { "type": "integer", "minimum": 0 },
+        "requested_models": { "type": "integer", "minimum": 0 },
+        "validated_models": { "type": "array", "items": { "type": "string" } },
+        "skipped_models": { "type": "array", "items": { "$ref": "#/$defs/skipped_model" } }
+      }
+    },
+    "skipped_model": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "reason"],
+      "properties": { "id": { "type": "string" }, "reason": { "type": "string" } }
+    },
+    "model": {
+      "type": "object", "additionalProperties": false,
+      "required": ["unique_id", "name", "account", "ci_relation", "production_relation", "dbt_build", "build_strategy", "comparison"],
+      "properties": {
+        "unique_id": { "type": "string" }, "name": { "type": "string" },
+        "account": { "type": "string" }, "ci_relation": { "type": "string" },
+        "production_relation": { "type": ["string", "null"] },
+        "dbt_build": { "enum": ["pending", "passed", "failed"] },
+        "build_strategy": { "enum": ["standard", "first_build", "incremental_clone", "full_refresh"] },
+        "comparison": { "anyOf": [{ "$ref": "#/$defs/model_comparison" }, { "type": "null" }] }
+      }
+    },
+    "model_comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ci_row_count", "production_row_count", "row_count_relative_change", "columns", "primary_key"],
+      "properties": {
+        "ci_row_count": { "type": "integer", "minimum": 0 },
+        "production_row_count": { "type": "integer", "minimum": 0 },
+        "row_count_relative_change": { "type": "number", "minimum": 0 },
+        "columns": { "type": "array", "items": { "$ref": "#/$defs/column_comparison" } },
+        "primary_key": { "anyOf": [{ "$ref": "#/$defs/primary_key_comparison" }, { "type": "null" }] }
+      }
+    },
+    "column_comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "ci_type", "production_type", "ci", "production"],
+      "properties": {
+        "name": { "type": "string" }, "ci_type": { "type": ["string", "null"] },
+        "production_type": { "type": ["string", "null"] },
+        "ci": { "anyOf": [{ "$ref": "#/$defs/column_metrics" }, { "type": "null" }] },
+        "production": { "anyOf": [{ "$ref": "#/$defs/column_metrics" }, { "type": "null" }] }
+      }
+    },
+    "column_metrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["null_count", "null_rate", "cardinality"],
+      "properties": {
+        "null_count": { "type": "integer", "minimum": 0 },
+        "null_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "cardinality": { "type": "integer", "minimum": 0 },
+        "min": { "type": "string" }, "max": { "type": "string" },
+        "average": { "type": "number" }, "p05": { "type": "number" },
+        "p50": { "type": "number" }, "p95": { "type": "number" }
+      }
+    },
+    "primary_key_comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "columns", "ci_only_count", "production_only_count", "ci_only_examples",
+        "production_only_examples", "ci_duplicate_key_count", "production_duplicate_key_count",
+        "ci_duplicate_rows", "production_duplicate_rows",
+        "ci_null_key_rows", "production_null_key_rows", "ci_duplicate_examples"
+      ],
+      "properties": {
+        "columns": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "ci_only_count": { "type": "integer", "minimum": 0 },
+        "production_only_count": { "type": "integer", "minimum": 0 },
+        "ci_only_examples": { "$ref": "#/$defs/key_examples" },
+        "production_only_examples": { "$ref": "#/$defs/key_examples" },
+        "ci_duplicate_key_count": { "type": "integer", "minimum": 0 },
+        "production_duplicate_key_count": { "type": "integer", "minimum": 0 },
+        "ci_duplicate_rows": { "type": "integer", "minimum": 0 },
+        "production_duplicate_rows": { "type": "integer", "minimum": 0 },
+        "ci_null_key_rows": { "type": "integer", "minimum": 0 },
+        "production_null_key_rows": { "type": "integer", "minimum": 0 },
+        "ci_duplicate_examples": { "$ref": "#/$defs/key_examples" }
+      }
+    },
+    "key_examples": {
+      "type": "array", "items": { "type": "array", "items": { "type": ["string", "null"] } }
+    },
+    "finding": {
+      "type": "object", "additionalProperties": false, "required": ["model", "check", "message"],
+      "properties": { "model": { "type": "string" }, "check": { "type": "string" }, "message": { "type": "string" } }
+    },
+    "coverage_gap": {
+      "type": "object", "additionalProperties": false, "required": ["scope", "check", "reason"],
+      "properties": { "scope": { "type": "string" }, "check": { "type": "string" }, "reason": { "type": "string" } }
+    },
+    "notice": {
+      "type": "object", "additionalProperties": false, "required": ["scope", "code", "message"],
+      "properties": { "scope": { "type": "string" }, "code": { "type": "string" }, "message": { "type": "string" } }
+    },
+    "asset": {
+      "type": "object", "additionalProperties": false, "required": ["id", "name"],
+      "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "url": { "type": "string" } }
+    },
+    "lineage_edge": {
+      "type": "object", "additionalProperties": false, "required": ["from", "from_name", "to", "to_name"],
+      "properties": {
+        "from": { "type": "string" }, "from_name": { "type": "string" },
+        "to": { "type": "string" }, "to_name": { "type": "string" }
+      }
+    },
+    "lineage_change": {
+      "type": "object", "additionalProperties": false, "required": ["change", "edge"],
+      "properties": {
+        "change": { "enum": ["added", "removed"] }, "edge": { "$ref": "#/$defs/lineage_edge" }
+      }
+    },
+    "cross_account_dependency": {
+      "type": "object", "additionalProperties": false, "required": ["from", "to", "columns"],
+      "properties": {
+        "from": { "type": "string" }, "to": { "type": "string" },
+        "columns": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "impact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dbt_models", "dbt_exposures", "dbt_lineage", "dbt_lineage_changes", "metabase_dashboards", "cross_account_dependencies"],
+      "properties": {
+        "dbt_models": { "type": "array", "items": { "$ref": "#/$defs/asset" } },
+        "dbt_exposures": { "type": "array", "items": { "$ref": "#/$defs/asset" } },
+        "dbt_lineage": { "type": "array", "items": { "$ref": "#/$defs/lineage_edge" } },
+        "dbt_lineage_changes": { "type": "array", "items": { "$ref": "#/$defs/lineage_change" } },
+        "metabase_dashboards": { "type": "array", "items": { "$ref": "#/$defs/asset" } },
+        "cross_account_dependencies": { "type": "array", "items": { "$ref": "#/$defs/cross_account_dependency" } }
+      }
+    }
+  }
+}

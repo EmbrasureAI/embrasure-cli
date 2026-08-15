@@ -8,7 +8,7 @@ use crate::{
     auth,
     config::Config,
     metabase,
-    snowflake::{QueryResult, SnowflakeClient, quote_identifier},
+    snowflake::{QueryResult, Relation, SnowflakeClient, quote_identifier},
 };
 
 #[derive(Debug, Serialize)]
@@ -129,6 +129,7 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
                 continue;
             }
         }
+        let mut clone_source = None;
         let production = format!(
             "SHOW TABLES IN SCHEMA {}.{}",
             quote_identifier(&account.database),
@@ -137,6 +138,7 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
         match client.execute(&production).await {
             Ok(tables) => {
                 let mut relations = relation_names(&tables);
+                clone_source = relations.first().cloned();
                 let views = format!(
                     "SHOW VIEWS IN SCHEMA {}.{}",
                     quote_identifier(&account.database),
@@ -187,21 +189,55 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
                 Uuid::new_v4().simple()
             );
             match client.create_schema(&account.database, &schema).await {
-                Ok(()) => match client
-                    .drop_schema(&account.database, &schema, &schema)
-                    .await
-                {
-                    Ok(()) => report.pass(
-                        &scope,
-                        "ci_schema_lifecycle",
-                        "created and removed a temporary schema",
-                    ),
-                    Err(error) => report.fail(
-                        &scope,
-                        "ci_schema_lifecycle",
-                        format!("created {schema}, but cleanup failed: {error:#}"),
-                    ),
-                },
+                Ok(()) => {
+                    if let Some(identifier) = clone_source {
+                        let source = Relation {
+                            database: account.database.clone(),
+                            schema: account.production_schema.clone(),
+                            identifier,
+                        };
+                        let target = Relation {
+                            database: account.database.clone(),
+                            schema: schema.clone(),
+                            identifier: "EMBRASURE_CLONE_CHECK".into(),
+                        };
+                        match client.clone_table(&source, &target).await {
+                            Ok(()) => report.pass(
+                                &scope,
+                                "incremental_clone",
+                                "can zero-copy clone a production table",
+                            ),
+                            Err(error) => report.fail(
+                                &scope,
+                                "incremental_clone",
+                                format!(
+                                    "cannot clone a production table: {error:#}; confirm the relation type and update grants"
+                                ),
+                            ),
+                        }
+                    } else {
+                        report.skip(
+                            &scope,
+                            "incremental_clone",
+                            "no production table was available to test (views cannot be cloned)",
+                        );
+                    }
+                    match client
+                        .drop_schema(&account.database, &schema, &schema)
+                        .await
+                    {
+                        Ok(()) => report.pass(
+                            &scope,
+                            "ci_schema_lifecycle",
+                            "created and removed a temporary schema",
+                        ),
+                        Err(error) => report.fail(
+                            &scope,
+                            "ci_schema_lifecycle",
+                            format!("created {schema}, but cleanup failed: {error:#}"),
+                        ),
+                    }
+                }
                 Err(error) => report.fail(
                     &scope,
                     "ci_schema_lifecycle",
@@ -210,6 +246,7 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
             }
         } else {
             report.skip(&scope, "ci_schema_lifecycle", "skipped by --read-only");
+            report.skip(&scope, "incremental_clone", "skipped by --read-only");
         }
     }
 

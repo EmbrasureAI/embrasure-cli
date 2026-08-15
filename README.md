@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Catch unexpected data changes before a dbt PR is reviewed.</strong></p>
 
-Embrasure builds the dbt models changed on your branch and their downstream dependents in a temporary Snowflake schema. It compares them with production, runs your existing dbt tests, reports downstream impact, and removes the schema when it finishes.
+Embrasure builds the dbt models changed on your branch and the paths to critical downstream models in temporary Snowflake schemas. It compares them with production, runs your existing dbt tests, reports the full downstream impact, and removes the schemas when it finishes.
 
 Use it locally or in CI. It connects directly to Snowflake, so no Embrasure account or hosted service is required.
 
@@ -16,6 +16,7 @@ Use it locally or in CI. It connects directly to Snowflake, so no Embrasure acco
 - Columns added, removed, renamed, or changed to an incompatible type
 - Unexpected shifts in row counts, null rates, cardinality, ranges, averages, and percentiles
 - Primary-key values that appear or disappear
+- Duplicate and null primary keys introduced by the branch
 - Failures in your existing dbt tests
 - Downstream dbt models, exposures, cross-account dependencies, and optional Metabase dashboards affected by the change
 - Models affected by non-dbt changes you map in the configuration
@@ -44,7 +45,10 @@ Example result:
 ```text
 embrasure: PASS
 2 selected · 2 built · 2 compared · 0 findings · 0 coverage gaps
+5 impacted · 2 validated · 3 not validated
 ```
+
+The default checks changed models plus every path to critical models: models tagged `critical`, marked critical in Embrasure, or directly used by a dbt exposure. Use `--downstream all` for every downstream model or `--downstream none` for changed models only. The complete impact is reported in every mode.
 
 ## Use it with an agent or CI
 
@@ -55,7 +59,7 @@ embrasure check --base origin/main --json
 embrasure check --base origin/main --json --markdown embrasure-check.md
 ```
 
-For a faster first pass on large tables, add `--mode quick`. Deep mode remains the default and includes exact cardinality plus numeric percentiles.
+For a faster first pass on large tables, add `--mode quick`. Deep mode remains the default and includes exact cardinality plus numeric percentiles. Primary-key integrity remains exact in both modes.
 
 The intended agent loop is simple:
 
@@ -76,13 +80,13 @@ Do not request review until it exits 0.
 
 ## Advanced setup
 
-The guided setup creates the smallest configuration needed for one Snowflake account. For service credentials, multiple accounts, primary keys, large-table filters, concurrency and time limits, custom thresholds, non-dbt changes, cross-account dependencies, or Metabase, use the [example configuration](embrasure-check.example.yml) and [enterprise setup guide](docs/enterprise.md).
+The guided setup creates the smallest configuration needed for one Snowflake account. For service credentials, multiple accounts, critical-model policies, primary keys, large-table filters, per-model thresholds, concurrency and time limits, non-dbt changes, cross-account dependencies, or Metabase, use the [example configuration](embrasure-check.example.yml) and [enterprise setup guide](docs/enterprise.md).
 
 ## Safety
 
 Embrasure uses a dedicated warehouse, query tags, statement timeouts, and a configurable model limit. Every temporary schema has a unique name and ownership marker. The CLI checks both before dropping it and treats cleanup failures as execution failures.
 
-Use a Snowflake role that can read the production relations under test and create temporary schemas in the configured CI database. Credentials are never written to reports or normal terminal output.
+Use a Snowflake role that can read and clone production tables under test and create temporary schemas in each relevant database. Credentials are never written to reports or normal terminal output.
 
 See [Security and data flow](docs/security-and-data-flow.md) for the exact network connections, local files, data returned from Snowflake, credential handling, cleanup behavior, and release-verification steps.
 
@@ -95,7 +99,7 @@ If you previously installed `@embrasure/cli` with npm, uninstall it first with `
 ## Current limits
 
 - Snowflake is the only supported warehouse.
-- dbt model lineage and exposures are authoritative. Missing column-level lineage is reported as unknown.
+- dbt model lineage and exposures are authoritative. dbt artifacts alone cannot provide authoritative warehouse-to-dashboard column lineage; the CLI states this as an informational limit.
 - Metabase matching covers native SQL cards that reference fully qualified production relations. Unsupported or inaccessible metadata is reported as a coverage gap.
 
 ## Development
@@ -107,5 +111,7 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
 ```
+
+The opt-in Snowflake suite is gated by `EMBRASURE_RUN_SNOWFLAKE_TESTS=1` and the `EMBRASURE_TEST_SNOWFLAKE_*` account, user, role, database, warehouse, and token variables. It exercises two schemas, zero-copy incremental seeding, full refresh, duplicate detection, cleanup, and 100,000 synthetic rows.
 
 Contributions are welcome under the [Apache 2.0 license](LICENSE).

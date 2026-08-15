@@ -239,6 +239,11 @@ impl SnowflakeClient {
         Ok(())
     }
 
+    pub async fn clone_table(&self, source: &Relation, target: &Relation) -> Result<()> {
+        self.execute(&clone_table_statement(source, target)).await?;
+        Ok(())
+    }
+
     pub async fn drop_schema(&self, database: &str, schema: &str, run_schema: &str) -> Result<()> {
         if !is_managed_schema(schema, run_schema) {
             bail!("refusing to drop schema {schema}: it is not owned by this run ({run_schema})");
@@ -301,6 +306,10 @@ impl SnowflakeClient {
         );
         Ok(headers)
     }
+}
+
+fn clone_table_statement(source: &Relation, target: &Relation) -> String {
+    format!("CREATE TABLE {} CLONE {}", target.sql(), source.sql())
 }
 
 fn statement_body(
@@ -449,7 +458,7 @@ pub fn is_managed_schema(schema: &str, run_schema: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuthConfig;
+    use crate::{auth::ResolvedAuth, config::AuthConfig};
     use openssl::{rsa::Rsa, sign::Verifier};
 
     #[test]
@@ -477,6 +486,27 @@ mod tests {
         ));
         assert!(!is_managed_schema("EMBRASURE_CHECK_PROD", run));
         assert!(!is_managed_schema("EMBRASURE_CHECK_SHA_TIME_RANDOMLY", run));
+    }
+
+    #[test]
+    fn clone_seed_is_zero_copy_and_quotes_every_identifier() {
+        let source = Relation {
+            database: "PROD DB".into(),
+            schema: "ANALYTICS".into(),
+            identifier: "Order Facts".into(),
+        };
+        let target = Relation {
+            database: "CI DB".into(),
+            schema: "EMBRASURE_RUN_BASELINE".into(),
+            identifier: "MODEL_0".into(),
+        };
+        let sql = clone_table_statement(&source, &target);
+        assert_eq!(
+            sql,
+            r#"CREATE TABLE "CI DB"."EMBRASURE_RUN_BASELINE"."MODEL_0" CLONE "PROD DB"."ANALYTICS"."Order Facts""#
+        );
+        assert!(!sql.contains(" AS SELECT "));
+        assert!(!sql.contains("INSERT"));
     }
 
     #[test]
@@ -547,5 +577,114 @@ mod tests {
             body["parameters"],
             serde_json::json!({ "query_tag": "check:1" })
         );
+    }
+
+    #[tokio::test]
+    async fn snowflake_incremental_strategies_and_scale() {
+        if env::var("EMBRASURE_RUN_SNOWFLAKE_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let required = |name: &str| {
+            env::var(name).unwrap_or_else(|_| {
+                panic!("{name} is required when EMBRASURE_RUN_SNOWFLAKE_TESTS=1")
+            })
+        };
+        let account = AccountConfig {
+            name: "integration".into(),
+            account: required("EMBRASURE_TEST_SNOWFLAKE_ACCOUNT"),
+            user: required("EMBRASURE_TEST_SNOWFLAKE_USER"),
+            role: required("EMBRASURE_TEST_SNOWFLAKE_ROLE"),
+            database: required("EMBRASURE_TEST_SNOWFLAKE_DATABASE"),
+            warehouse: required("EMBRASURE_TEST_SNOWFLAKE_WAREHOUSE"),
+            production_schema: "unused".into(),
+            selector: None,
+            auth: AuthConfig::ProgrammaticAccessToken {
+                token_env: "EMBRASURE_TEST_SNOWFLAKE_TOKEN".into(),
+            },
+        };
+        let auth = ResolvedAuth::ProgrammaticAccessToken {
+            token: required("EMBRASURE_TEST_SNOWFLAKE_TOKEN"),
+        };
+        let run_schema = format!("EMBRASURE_IT_{}", Uuid::new_v4().simple()).to_ascii_uppercase();
+        let second_schema = format!("{run_schema}_SECOND");
+        let client = SnowflakeClient::new(
+            &account,
+            &auth,
+            format!("embrasure:integration:{run_schema}"),
+            300,
+        )
+        .unwrap();
+        client
+            .create_schema(&account.database, &run_schema)
+            .await
+            .unwrap();
+        client
+            .create_schema(&account.database, &second_schema)
+            .await
+            .unwrap();
+
+        let source = Relation {
+            database: account.database.clone(),
+            schema: run_schema.clone(),
+            identifier: "SOURCE".into(),
+        };
+        let baseline = Relation {
+            database: account.database.clone(),
+            schema: second_schema.clone(),
+            identifier: "BASELINE".into(),
+        };
+        let candidate = Relation {
+            database: account.database.clone(),
+            schema: second_schema.clone(),
+            identifier: "CANDIDATE".into(),
+        };
+        let result = async {
+            client
+                .execute(&format!(
+                    "CREATE TABLE {} AS SELECT ID, MOD(ID, 100) AS SEGMENT FROM (SELECT ROW_NUMBER() OVER (ORDER BY SEQ4()) - 1 AS ID FROM TABLE(GENERATOR(ROWCOUNT => 100000)))",
+                    source.sql()
+                ))
+                .await?;
+            client.clone_table(&source, &baseline).await?;
+            client.clone_table(&baseline, &candidate).await?;
+            client
+                .execute(&format!(
+                    "MERGE INTO {} C USING (SELECT 100000 AS ID, 0 AS SEGMENT) N ON C.ID = N.ID WHEN NOT MATCHED THEN INSERT (ID, SEGMENT) VALUES (N.ID, N.SEGMENT)",
+                    candidate.sql()
+                ))
+                .await?;
+            let incremental = client
+                .execute(&format!("SELECT COUNT(*) FROM {}", candidate.sql()))
+                .await?;
+            assert_eq!(incremental.rows[0][0].as_deref(), Some("100001"));
+
+            client
+                .execute(&format!(
+                    "CREATE OR REPLACE TABLE {} AS SELECT * FROM {} WHERE ID < 50000 UNION ALL SELECT 1, 1",
+                    candidate.sql(), baseline.sql()
+                ))
+                .await?;
+            let integrity = client
+                .execute(&format!(
+                    "SELECT COUNT(*) AS ROWS, COUNT_IF(ID IS NULL) AS NULL_KEYS, COUNT(*) - COUNT(DISTINCT ID) AS DUPLICATE_ROWS FROM {}",
+                    candidate.sql()
+                ))
+                .await?;
+            assert_eq!(integrity.rows[0][0].as_deref(), Some("50001"));
+            assert_eq!(integrity.rows[0][1].as_deref(), Some("0"));
+            assert_eq!(integrity.rows[0][2].as_deref(), Some("1"));
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        let second_cleanup = client
+            .drop_schema(&account.database, &second_schema, &run_schema)
+            .await;
+        let first_cleanup = client
+            .drop_schema(&account.database, &run_schema, &run_schema)
+            .await;
+        result.unwrap();
+        second_cleanup.unwrap();
+        first_cleanup.unwrap();
     }
 }

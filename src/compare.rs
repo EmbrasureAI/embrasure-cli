@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    config::{ComparisonMode, SafetyConfig, Thresholds},
+    config::{ComparisonMode, KeyPolicy, SafetyConfig, Thresholds},
     report::{ColumnComparison, ColumnMetrics, Finding, ModelComparison, PrimaryKeyComparison},
     snowflake::{Relation, ResultColumn, SnowflakeClient, quote_identifier},
 };
@@ -19,6 +19,7 @@ pub async fn compare_model(
         primary_key,
         where_clause,
         mode,
+        key_policy,
         safety,
         thresholds,
     } = options;
@@ -210,6 +211,25 @@ pub async fn compare_model(
                 ),
             ));
         }
+        if key_integrity_fails(&comparison, key_policy) {
+            findings.push(finding(
+                model_id,
+                "primary_key",
+                format!(
+                    "CI has {} duplicate keys ({} extra rows) and {} null-key rows vs {} ({} extra rows) and {} in production ({})",
+                    comparison.ci_duplicate_key_count,
+                    comparison.ci_duplicate_rows,
+                    comparison.ci_null_key_rows,
+                    comparison.production_duplicate_key_count,
+                    comparison.production_duplicate_rows,
+                    comparison.production_null_key_rows,
+                    match key_policy {
+                        KeyPolicy::Regression => "regressions fail",
+                        KeyPolicy::Strict => "strict policy requires zero",
+                    }
+                ),
+            ));
+        }
         Some(comparison)
     } else {
         findings.push(finding(
@@ -232,10 +252,24 @@ pub async fn compare_model(
     ))
 }
 
+fn key_integrity_fails(comparison: &PrimaryKeyComparison, policy: KeyPolicy) -> bool {
+    match policy {
+        KeyPolicy::Regression => {
+            comparison.ci_duplicate_key_count > comparison.production_duplicate_key_count
+                || comparison.ci_duplicate_rows > comparison.production_duplicate_rows
+                || comparison.ci_null_key_rows > comparison.production_null_key_rows
+        }
+        KeyPolicy::Strict => {
+            comparison.ci_duplicate_key_count > 0 || comparison.ci_null_key_rows > 0
+        }
+    }
+}
+
 pub struct CompareOptions<'a> {
     pub primary_key: &'a [String],
     pub where_clause: Option<&'a str>,
     pub mode: ComparisonMode,
+    pub key_policy: KeyPolicy,
     pub safety: &'a SafetyConfig,
     pub thresholds: Thresholds,
 }
@@ -362,15 +396,46 @@ async fn compare_primary_key(
         .join(", ");
     let ci_source = filtered_relation(ci, where_clause);
     let production_source = filtered_relation(production, where_clause);
-    let ci_only = format!(
-        "SELECT {selected} FROM {ci_source} MINUS SELECT {selected} FROM {production_source}"
+    let ci_keys = format!(
+        "SELECT {selected}, COUNT(*) AS KEY_ROWS, 1 AS PRESENT FROM {ci_source} GROUP BY {selected}"
     );
-    let production_only = format!(
-        "SELECT {selected} FROM {production_source} MINUS SELECT {selected} FROM {ci_source}"
+    let production_keys = format!(
+        "SELECT {selected}, COUNT(*) AS KEY_ROWS, 1 AS PRESENT FROM {production_source} GROUP BY {selected}"
     );
+    let join = keys
+        .iter()
+        .map(|key| {
+            let key = quote_identifier(key);
+            format!("EQUAL_NULL(C.{key}, P.{key})")
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let ci_null = keys
+        .iter()
+        .map(|key| format!("C.{} IS NULL", quote_identifier(key)))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let production_null = keys
+        .iter()
+        .map(|key| format!("P.{} IS NULL", quote_identifier(key)))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let ci_null_unqualified = keys
+        .iter()
+        .map(|key| format!("{} IS NULL", quote_identifier(key)))
+        .collect::<Vec<_>>()
+        .join(" OR ");
     let counts = client
         .execute(&format!(
-            "SELECT (SELECT COUNT(*) FROM ({ci_only})), (SELECT COUNT(*) FROM ({production_only}))"
+            "WITH CI_KEYS AS ({ci_keys}), PRODUCTION_KEYS AS ({production_keys}) \
+             SELECT COUNT_IF(P.PRESENT IS NULL), COUNT_IF(C.PRESENT IS NULL), \
+             COUNT_IF(C.PRESENT IS NOT NULL AND NOT ({ci_null}) AND C.KEY_ROWS > 1), \
+             COUNT_IF(P.PRESENT IS NOT NULL AND NOT ({production_null}) AND P.KEY_ROWS > 1), \
+             COALESCE(SUM(IFF(C.PRESENT IS NOT NULL AND NOT ({ci_null}), GREATEST(C.KEY_ROWS - 1, 0), 0)), 0), \
+             COALESCE(SUM(IFF(P.PRESENT IS NOT NULL AND NOT ({production_null}), GREATEST(P.KEY_ROWS - 1, 0), 0)), 0), \
+             COALESCE(SUM(IFF(C.PRESENT IS NOT NULL AND ({ci_null}), C.KEY_ROWS, 0)), 0), \
+             COALESCE(SUM(IFF(P.PRESENT IS NOT NULL AND ({production_null}), P.KEY_ROWS, 0)), 0) \
+             FROM CI_KEYS C FULL OUTER JOIN PRODUCTION_KEYS P ON {join}"
         ))
         .await?;
     let row = counts
@@ -379,12 +444,30 @@ async fn compare_primary_key(
         .context("primary-key count returned no row")?;
     let ci_only_count = parse_u64(row.first().and_then(Option::as_deref))?;
     let production_only_count = parse_u64(row.get(1).and_then(Option::as_deref))?;
+    let ci_duplicate_key_count = parse_u64(row.get(2).and_then(Option::as_deref))?;
+    let production_duplicate_key_count = parse_u64(row.get(3).and_then(Option::as_deref))?;
+    let ci_duplicate_rows = parse_u64(row.get(4).and_then(Option::as_deref))?;
+    let production_duplicate_rows = parse_u64(row.get(5).and_then(Option::as_deref))?;
+    let ci_null_key_rows = parse_u64(row.get(6).and_then(Option::as_deref))?;
+    let production_null_key_rows = parse_u64(row.get(7).and_then(Option::as_deref))?;
+    let ci_selected = keys
+        .iter()
+        .map(|key| format!("C.{}", quote_identifier(key)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let production_selected = keys
+        .iter()
+        .map(|key| format!("P.{}", quote_identifier(key)))
+        .collect::<Vec<_>>()
+        .join(", ");
     let ci_examples = if ci_only_count == 0 {
         vec![]
     } else {
         client
             .execute(&format!(
-                "SELECT * FROM ({ci_only}) ORDER BY {selected} LIMIT {sample_limit}"
+                "WITH CI_KEYS AS ({ci_keys}), PRODUCTION_KEYS AS ({production_keys}) \
+                 SELECT {ci_selected} FROM CI_KEYS C LEFT JOIN PRODUCTION_KEYS P ON {join} \
+                 WHERE P.PRESENT IS NULL ORDER BY {ci_selected} LIMIT {sample_limit}"
             ))
             .await?
             .rows
@@ -394,7 +477,22 @@ async fn compare_primary_key(
     } else {
         client
             .execute(&format!(
-                "SELECT * FROM ({production_only}) ORDER BY {selected} LIMIT {sample_limit}"
+                "WITH CI_KEYS AS ({ci_keys}), PRODUCTION_KEYS AS ({production_keys}) \
+                 SELECT {production_selected} FROM PRODUCTION_KEYS P LEFT JOIN CI_KEYS C ON {join} \
+                 WHERE C.PRESENT IS NULL ORDER BY {production_selected} LIMIT {sample_limit}"
+            ))
+            .await?
+            .rows
+    };
+    let ci_duplicate_examples = if ci_duplicate_rows == 0 {
+        vec![]
+    } else {
+        client
+            .execute(&format!(
+                "SELECT {selected} FROM (SELECT * FROM {ci_source}) AS CI_SOURCE \
+                 WHERE NOT ({ci_null_unqualified}) \
+                 GROUP BY {selected} HAVING COUNT(*) > 1 \
+                 ORDER BY COUNT(*) DESC, {selected} LIMIT {sample_limit}"
             ))
             .await?
             .rows
@@ -405,6 +503,13 @@ async fn compare_primary_key(
         production_only_count,
         ci_only_examples: ci_examples,
         production_only_examples: production_examples,
+        ci_duplicate_key_count,
+        production_duplicate_key_count,
+        ci_duplicate_rows,
+        production_duplicate_rows,
+        ci_null_key_rows,
+        production_null_key_rows,
+        ci_duplicate_examples,
     })
 }
 
@@ -559,5 +664,78 @@ mod tests {
             effective_cardinality_threshold(ComparisonMode::Deep, thresholds),
             thresholds.cardinality_relative
         );
+    }
+
+    fn key_metrics(
+        ci_duplicate_keys: u64,
+        production_duplicate_keys: u64,
+        ci_duplicate_rows: u64,
+        production_duplicate_rows: u64,
+        ci_nulls: u64,
+        production_nulls: u64,
+    ) -> PrimaryKeyComparison {
+        PrimaryKeyComparison {
+            columns: vec!["ID".into()],
+            ci_only_count: 0,
+            production_only_count: 0,
+            ci_only_examples: vec![],
+            production_only_examples: vec![],
+            ci_duplicate_key_count: ci_duplicate_keys,
+            production_duplicate_key_count: production_duplicate_keys,
+            ci_duplicate_rows,
+            production_duplicate_rows,
+            ci_null_key_rows: ci_nulls,
+            production_null_key_rows: production_nulls,
+            ci_duplicate_examples: vec![],
+        }
+    }
+
+    #[test]
+    fn regression_policy_allows_existing_key_debt_but_not_worse_ci() {
+        assert!(!key_integrity_fails(
+            &key_metrics(1, 1, 4, 4, 2, 2),
+            KeyPolicy::Regression
+        ));
+        assert!(key_integrity_fails(
+            &key_metrics(2, 1, 4, 4, 2, 2),
+            KeyPolicy::Regression
+        ));
+        assert!(key_integrity_fails(
+            &key_metrics(1, 1, 4, 4, 3, 2),
+            KeyPolicy::Regression
+        ));
+    }
+
+    #[test]
+    fn strict_policy_requires_clean_ci_keys() {
+        assert!(key_integrity_fails(
+            &key_metrics(1, 10, 1, 20, 0, 0),
+            KeyPolicy::Strict
+        ));
+        assert!(!key_integrity_fails(
+            &key_metrics(0, 10, 0, 20, 0, 5),
+            KeyPolicy::Strict
+        ));
+    }
+
+    #[test]
+    fn key_columns_resolve_case_only_when_unambiguous() {
+        let unique = column_map(&[ResultColumn {
+            name: "ORDER_ID".into(),
+            data_type: "NUMBER".into(),
+        }]);
+        assert_eq!(resolve_column(&unique, "order_id"), Some("ORDER_ID".into()));
+
+        let ambiguous = column_map(&[
+            ResultColumn {
+                name: "ID".into(),
+                data_type: "NUMBER".into(),
+            },
+            ResultColumn {
+                name: "id".into(),
+                data_type: "NUMBER".into(),
+            },
+        ]);
+        assert_eq!(resolve_column(&ambiguous, "Id"), None);
     }
 }
