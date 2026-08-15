@@ -13,18 +13,20 @@ Use it locally or in CI. It connects directly to Snowflake, so no Embrasure acco
 
 ## Quick start
 
-You need Git, dbt Core with the Snowflake adapter, and Rust 1.85 or newer.
+You need Git and dbt Core with the Snowflake adapter. Rust is not required.
 
-Install the CLI:
+Install the prebuilt CLI on macOS or Linux:
 
 ```sh
-cargo install --git https://github.com/EmbrasureAI/embrasure-cli --tag v0.3.1 --locked
+brew install embrasureai/tap/embrasure
 ```
+
+Signed Intel and ARM downloads are also available on the [releases page](https://github.com/EmbrasureAI/embrasure-cli/releases). Each release includes SHA-256 checksums, an SPDX software bill of materials, and GitHub build-provenance attestations.
 
 Download the example configuration into your dbt project:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/v0.3.1/embrasure-check.example.yml \
+curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/v0.3.2/embrasure-check.example.yml \
   -o embrasure-check.yml
 ```
 
@@ -99,6 +101,8 @@ Embrasure uses a dedicated warehouse, query tags, statement timeouts, and a conf
 
 Use a Snowflake role that can read the production relations under test and create temporary schemas in the configured CI database. Credentials are never written to reports or normal terminal output.
 
+See [Security and data flow](docs/security-and-data-flow.md) for the exact network connections, local files, data returned from Snowflake, credential handling, cleanup behavior, and release-verification steps.
+
 ## Current limits
 
 - Snowflake is the only supported warehouse.
@@ -106,6 +110,8 @@ Use a Snowflake role that can read the production relations under test and creat
 - Metabase matching covers native SQL cards that reference fully qualified production relations. Unsupported or inaccessible metadata is reported as a coverage gap.
 
 ## Development
+
+Rust 1.85 or newer is required only when building from source.
 
 ```sh
 cargo fmt --check
