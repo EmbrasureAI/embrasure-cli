@@ -273,10 +273,7 @@ impl SnowflakeClient {
     }
 
     fn schema_ownership_marker(&self) -> String {
-        format!(
-            "Temporary schema managed by embrasure-check; {}",
-            self.query_tag
-        )
+        format!("Temporary schema managed by Embrasure; {}", self.query_tag)
     }
 
     fn headers(&self) -> Result<header::HeaderMap> {
@@ -295,10 +292,7 @@ impl SnowflakeClient {
         );
         headers.insert(
             header::USER_AGENT,
-            header::HeaderValue::from_static(concat!(
-                "embrasure-check/",
-                env!("CARGO_PKG_VERSION")
-            )),
+            header::HeaderValue::from_static(concat!("embrasure/", env!("CARGO_PKG_VERSION"))),
         );
         headers.insert(
             "X-Snowflake-Authorization-Token-Type",

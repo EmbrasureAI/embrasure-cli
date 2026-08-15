@@ -226,7 +226,7 @@ impl Report {
             Status::ExecutionFailure => "EXECUTION FAILURE",
         };
         let mut output = format!(
-            "embrasure-check: {label}\n{} selected · {} built · {} compared · {} findings · {} coverage gaps\n",
+            "embrasure: {label}\n{} selected · {} built · {} compared · {} findings · {} coverage gaps\n",
             self.summary.models_selected,
             self.summary.models_built,
             self.summary.models_compared,
@@ -282,7 +282,7 @@ impl Report {
     }
 
     pub fn markdown(&self) -> String {
-        let mut output = String::from("# embrasure-check report\n\n");
+        let mut output = String::from("# Embrasure check report\n\n");
         let _ = writeln!(output, "**Status:** `{:?}`  ", self.status);
         let _ = writeln!(output, "**Base:** `{}`  ", self.base);
         let _ = writeln!(output, "**Exit code:** `{}`\n", self.exit_code);

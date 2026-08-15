@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "embrasure-check",
+    name = "embrasure",
     version,
     about = "Validate dbt changes against production Snowflake data"
 )]
@@ -26,7 +26,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Build and compare changed dbt models.
-    Run {
+    #[command(alias = "run")]
+    Check {
         /// Git revision used as the production comparison base.
         #[arg(long, default_value = "origin/main")]
         base: String,
@@ -90,13 +91,13 @@ enum AuthCommand {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run {
+        Command::Check {
             base,
             config,
             json,
             markdown,
         } => {
-            eprintln!("embrasure-check: validating changes against {base}");
+            eprintln!("embrasure: validating changes against {base}");
             let mut report = run::run_check(&config, &base).await;
             if let Some(path) = markdown
                 && let Err(error) = report.write_markdown(&path)
@@ -110,7 +111,7 @@ async fn main() -> ExitCode {
                 match serde_json::to_string_pretty(&report) {
                     Ok(value) => println!("{value}"),
                     Err(error) => {
-                        eprintln!("embrasure-check: could not serialize JSON report: {error}");
+                        eprintln!("embrasure: could not serialize JSON report: {error}");
                         return ExitCode::from(report::EXIT_EXECUTION);
                     }
                 }
@@ -146,7 +147,7 @@ async fn main() -> ExitCode {
                         ExitCode::SUCCESS
                     }
                     Err(error) => {
-                        eprintln!("embrasure-check: {error:#}");
+                        eprintln!("embrasure: {error:#}");
                         ExitCode::from(report::EXIT_EXECUTION)
                     }
                 }
@@ -171,7 +172,7 @@ async fn main() -> ExitCode {
                     })
                 }
                 Err(error) => {
-                    eprintln!("embrasure-check: {error:#}");
+                    eprintln!("embrasure: {error:#}");
                     ExitCode::from(report::EXIT_EXECUTION)
                 }
             },
@@ -182,7 +183,7 @@ async fn main() -> ExitCode {
                         ExitCode::SUCCESS
                     }
                     Err(error) => {
-                        eprintln!("embrasure-check: {error:#}");
+                        eprintln!("embrasure: {error:#}");
                         ExitCode::from(report::EXIT_EXECUTION)
                     }
                 }

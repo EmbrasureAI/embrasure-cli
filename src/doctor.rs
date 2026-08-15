@@ -29,7 +29,7 @@ pub struct Diagnostic {
 impl DoctorReport {
     pub fn human(&self) -> String {
         let mut output = format!(
-            "embrasure-check doctor: {}\n",
+            "embrasure doctor: {}\n",
             if self.ready { "READY" } else { "NOT READY" }
         );
         for item in &self.checks {
@@ -100,7 +100,7 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
                 continue;
             }
         };
-        let query_tag = format!("embrasure-check:doctor:{}", Uuid::new_v4());
+        let query_tag = format!("embrasure:doctor:{}", Uuid::new_v4());
         let client = match SnowflakeClient::new(
             account,
             &resolved,

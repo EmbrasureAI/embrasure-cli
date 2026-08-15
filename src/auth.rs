@@ -75,7 +75,7 @@ pub async fn resolve(account: &AccountConfig) -> Result<ResolvedAuth> {
         AuthConfig::OauthLocal => {
             let token = load_or_refresh_local_token(account).await.with_context(|| {
                 format!(
-                    "browser login is not ready for {}; run `embrasure-check auth login --account {}`",
+                    "browser login is not ready for {}; run `embrasure auth login --account {}`",
                     account.name, account.name
                 )
             })?;
@@ -245,7 +245,7 @@ async fn login(account: &AccountConfig) -> Result<String> {
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256");
 
-    eprintln!("embrasure-check: opening Snowflake sign-in in your browser");
+    eprintln!("embrasure: opening Snowflake sign-in in your browser");
     if webbrowser::open(authorize.as_str()).is_err() {
         eprintln!("Open this URL to sign in:\n{authorize}");
     }

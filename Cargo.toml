@@ -1,17 +1,17 @@
 [package]
-name = "embrasure-check"
-version = "0.2.1"
+name = "embrasure-cli"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Validate dbt changes against production Snowflake data"
+description = "Embrasure CLI for validating dbt changes against production Snowflake data"
 license = "Apache-2.0"
-repository = "https://github.com/EmbrasureAI/embrasure-check"
+repository = "https://github.com/EmbrasureAI/embrasure-cli"
 readme = "README.md"
 keywords = ["dbt", "snowflake", "data-quality", "cli"]
 categories = ["command-line-utilities", "development-tools::testing"]
 
 [[bin]]
-name = "embrasure-check"
+name = "embrasure"
 path = "src/main.rs"
 
 [dependencies]

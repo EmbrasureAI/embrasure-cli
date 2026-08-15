@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/EmbrasureAI/embrasure-check/schemas/report-v1.schema.json",
-  "title": "embrasure-check report v1",
+  "$id": "https://github.com/EmbrasureAI/embrasure-cli/schemas/report-v1.schema.json",
+  "title": "Embrasure check report v1",
   "type": "object",
   "additionalProperties": false,
   "required": [

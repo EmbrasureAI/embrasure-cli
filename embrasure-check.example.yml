@@ -31,7 +31,7 @@ accounts:
     # Required when more than one account is configured. This is a dbt selector.
     # selector: tag:primary_account
     auth:
-      # Best for a developer or local agent. Run `embrasure-check auth login` once.
+      # Best for a developer or local agent. Run `embrasure auth login` once.
       type: oauth_local
 
   # A second Snowflake account can use its own non-interactive credential.

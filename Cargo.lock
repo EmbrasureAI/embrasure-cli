@@ -320,8 +320,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "embrasure-check"
-version = "0.2.1"
+name = "embrasure-cli"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "assert_cmd",

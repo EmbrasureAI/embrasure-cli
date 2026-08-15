@@ -1,11 +1,11 @@
-# embrasure-check
+# Embrasure
 
-`embrasure-check` is an open-source Rust CLI that lets an agent build a dbt change in an isolated Snowflake schema, compare it with production data, understand downstream impact, fix problems, and rerun until the report is clean.
+Embrasure is an open-source Rust CLI that lets an agent build a dbt change in an isolated Snowflake schema, compare it with production data, understand downstream impact, fix problems, and rerun until the report is clean.
 
 It talks directly to Snowflake's SQL API. It does not require Embrasure Cloud, a UI, or MCP.
 
 ```console
-$ embrasure-check run --base origin/main --json
+$ embrasure check --base origin/main --json
 {
   "schema_version": 1,
   "status": "pass",
@@ -49,18 +49,20 @@ Argument parsing errors use clap's conventional exit code `2` before a report ca
 ## Install
 
 ```sh
-cargo install --git https://github.com/EmbrasureAI/embrasure-check --tag v0.2.1 --locked
+cargo install --git https://github.com/EmbrasureAI/embrasure-cli --tag v0.3.0 --locked
 ```
 
 ## Configure
 
 Copy [`embrasure-check.example.yml`](embrasure-check.example.yml) to `embrasure-check.yml` in the dbt repository. The CLI generates a temporary `profiles.yml`; existing user profiles are not changed.
 
+The configuration filename and local credential-cache path retain the `embrasure-check` name so existing installations continue to work. The previous `run` subcommand also remains available as an alias for `check`.
+
 For a local developer or coding agent, use Snowflake browser login:
 
 ```sh
-embrasure-check auth login
-embrasure-check doctor
+embrasure auth login
+embrasure doctor
 ```
 
 This uses Snowflake's [built-in local OAuth application](https://docs.snowflake.com/en/user-guide/oauth-local-applications) and PKCE. The short-lived access token and refresh token are stored under `~/.config/embrasure-check/oauth/` with owner-only permissions on Unix. Use `auth status` to inspect readiness and `auth logout` to remove it.
@@ -84,9 +86,9 @@ See the [enterprise setup guide](docs/enterprise.md) for least-privilege Snowfla
 Run this before the first validation or after changing credentials:
 
 ```sh
-embrasure-check auth status
-embrasure-check doctor
-embrasure-check doctor --json
+embrasure auth status
+embrasure doctor
+embrasure doctor --json
 ```
 
 `doctor` connects to every configured Snowflake account, confirms the requested role/warehouse/database, checks production read access, creates and removes a uniquely named temporary schema, and authenticates to Metabase when configured. Use `--read-only` when an administrator wants a non-mutating diagnostic, although that cannot prove CI schema permissions.
@@ -94,9 +96,9 @@ embrasure-check doctor --json
 ## Run
 
 ```sh
-embrasure-check run --base origin/main
-embrasure-check run --base origin/main --json
-embrasure-check run --base origin/main --markdown embrasure-check.md
+embrasure check --base origin/main
+embrasure check --base origin/main --json
+embrasure check --base origin/main --markdown embrasure-check.md
 ```
 
 If `dbt.state_dir` is omitted, the CLI creates a temporary detached Git worktree at `--base`, runs `dbt deps` when needed, and parses a production-state manifest for every account target. If CI already downloads production artifacts, point `dbt.state_dir` at the directory containing `manifest.json`. For target-specific artifacts, place them at `<state_dir>/<account name>/manifest.json`.
@@ -108,7 +110,7 @@ Deleted models are findings by default and their base-revision descendants and e
 An agent can use this loop:
 
 ```text
-Make the dbt change. Run `embrasure-check run --base origin/main --json`.
+Make the dbt change. Run `embrasure check --base origin/main --json`.
 For exit 1, fix every finding and rerun. For exit 2, explain and close every
 unknown coverage gap. For exit 3, fix the execution problem. Do not request
 review until the command exits 0.

@@ -6,7 +6,7 @@ The clean enterprise split is:
 - CI service users: a role-restricted programmatic access token or RSA key pair stored in the CI secret manager.
 - Existing identity platform: an externally issued OAuth token supplied through an environment variable.
 
-Each Snowflake account gets its own `accounts` entry, dbt selector, user, role, warehouse, and credential. Run `embrasure-check doctor` after setup; it verifies each one independently.
+Each Snowflake account gets its own `accounts` entry, dbt selector, user, role, warehouse, and credential. Run `embrasure doctor` after setup; it verifies each one independently.
 
 ## 1. Grant a narrow validation role
 
@@ -41,8 +41,8 @@ auth:
 ```
 
 ```sh
-embrasure-check auth login --account primary
-embrasure-check doctor
+embrasure auth login --account primary
+embrasure doctor
 ```
 
 Snowflake's built-in `SNOWFLAKE$LOCAL_APPLICATION` integration uses Authorization Code + PKCE and a loopback callback. Account administrators can apply their normal network policies and tune the integration's token lifetime.
@@ -144,8 +144,8 @@ metabase:
 ## 5. CI gate
 
 ```sh
-embrasure-check doctor --json
-embrasure-check run --base origin/main --json --markdown embrasure-check.md
+embrasure doctor --json
+embrasure check --base origin/main --json --markdown embrasure-check.md
 ```
 
 Treat exit `0` as ready for review, `1` as a data finding, `2` as missing evidence, and `3` as setup/execution failure.

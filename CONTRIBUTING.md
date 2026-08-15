@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve `embrasure-check`.
+Thanks for helping improve Embrasure.
 
 1. Open an issue before a large behavior or report-schema change.
 2. Keep Snowflake credentials in environment variables or local key files. Never add credentials, tokens, profiles, or query results to fixtures.

@@ -41,11 +41,7 @@ async fn execute(config: &Config, base: &str, report: &mut Report) -> Result<()>
         .await
         .context("could not resolve Snowflake credentials")?;
     let schema = dbt::ci_schema_name(&config.safety.schema_prefix, &config.dbt.project_dir)?;
-    let query_tag = format!(
-        "embrasure-check:{}:{}",
-        env!("CARGO_PKG_VERSION"),
-        Uuid::new_v4()
-    );
+    let query_tag = format!("embrasure:{}:{}", env!("CARGO_PKG_VERSION"), Uuid::new_v4());
     let mut clients = Vec::new();
 
     let main_result = {
