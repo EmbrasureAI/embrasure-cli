@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::{
     auth::ResolvedAuth,
     config::{AccountConfig, Config},
-    report::{CoverageGap, ImpactReport, ImpactedAsset},
+    report::{ImpactReport, ImpactedAsset, LineageChange, LineageChangeKind, LineageEdge},
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +38,8 @@ pub struct ManifestNode {
     pub alias: String,
     pub fqn: Vec<String>,
     #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
     pub depends_on: DependsOn,
     #[serde(default)]
     pub config: NodeConfig,
@@ -47,6 +49,10 @@ pub struct ManifestNode {
 pub struct NodeConfig {
     #[serde(default)]
     pub quoting: QuotePolicy,
+    #[serde(default)]
+    pub materialized: String,
+    #[serde(default)]
+    pub unique_key: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -153,6 +159,117 @@ impl Manifest {
         found
     }
 
+    pub fn model_descendants(&self, roots: &BTreeSet<String>) -> BTreeSet<String> {
+        self.descendants(roots)
+            .into_iter()
+            .filter(|id| {
+                self.nodes
+                    .get(id)
+                    .is_some_and(|node| node.resource_type == "model")
+            })
+            .collect()
+    }
+
+    pub fn critical_targets(
+        &self,
+        impacted: &BTreeSet<String>,
+        critical_tags: &BTreeSet<String>,
+        configured: &BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        let mut targets = impacted
+            .iter()
+            .filter(|id| {
+                configured.contains(*id)
+                    || self
+                        .nodes
+                        .get(*id)
+                        .is_some_and(|node| node.tags.iter().any(|tag| critical_tags.contains(tag)))
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for exposure in self.exposures.values() {
+            targets.extend(
+                exposure
+                    .depends_on
+                    .nodes
+                    .iter()
+                    .filter(|id| impacted.contains(*id))
+                    .cloned(),
+            );
+        }
+        targets
+    }
+
+    pub fn paths_between(
+        &self,
+        roots: &BTreeSet<String>,
+        targets: &BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        let downstream = self.descendants(roots);
+        let mut selected = targets
+            .intersection(&downstream)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut queue = selected.iter().cloned().collect::<VecDeque<_>>();
+        while let Some(id) = queue.pop_front() {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            for parent in &node.depends_on.nodes {
+                if downstream.contains(parent) && selected.insert(parent.clone()) {
+                    queue.push_back(parent.clone());
+                }
+            }
+        }
+        selected.extend(
+            roots
+                .iter()
+                .filter(|id| self.nodes.contains_key(*id))
+                .cloned(),
+        );
+        selected
+            .into_iter()
+            .filter(|id| {
+                self.nodes
+                    .get(id)
+                    .is_some_and(|node| node.resource_type == "model")
+            })
+            .collect()
+    }
+
+    pub fn inferred_primary_key(&self, id: &str) -> Result<Option<Vec<String>>> {
+        let Some(value) = self
+            .nodes
+            .get(id)
+            .and_then(|node| node.config.unique_key.as_ref())
+        else {
+            return Ok(None);
+        };
+        let keys = match value {
+            Value::String(key) => vec![key.clone()],
+            Value::Array(values) => values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(ToOwned::to_owned)
+                        .context("dbt unique_key list contains a non-string value")
+                })
+                .collect::<Result<Vec<_>>>()?,
+            _ => bail!("dbt unique_key is not a string or string list"),
+        };
+        if keys.is_empty() || keys.iter().any(|key| !is_simple_identifier(key)) {
+            bail!("dbt unique_key is an expression rather than a column identifier list");
+        }
+        Ok(Some(keys))
+    }
+
+    pub fn is_incremental(&self, id: &str) -> bool {
+        self.nodes
+            .get(id)
+            .is_some_and(|node| node.config.materialized.eq_ignore_ascii_case("incremental"))
+    }
+
     pub fn node_id(&self, id_or_name: &str) -> Option<String> {
         if self.nodes.contains_key(id_or_name) {
             return Some(id_or_name.to_owned());
@@ -222,14 +339,122 @@ impl Manifest {
                 url: exposure.url.clone(),
             })
             .collect::<Vec<_>>();
+        let mut dbt_lineage = self
+            .nodes
+            .values()
+            .filter(|node| node.resource_type == "model" && downstream.contains(&node.unique_id))
+            .flat_map(|node| {
+                node.depends_on.nodes.iter().filter_map(|dependency| {
+                    let parent = self.nodes.get(dependency)?;
+                    (parent.resource_type == "model" && downstream.contains(dependency)).then(
+                        || LineageEdge {
+                            from: parent.unique_id.clone(),
+                            from_name: parent.name.clone(),
+                            to: node.unique_id.clone(),
+                            to_name: node.name.clone(),
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        dbt_lineage.extend(self.exposures.values().flat_map(|exposure| {
+            exposure.depends_on.nodes.iter().filter_map(|dependency| {
+                let parent = self.nodes.get(dependency)?;
+                downstream.contains(dependency).then(|| LineageEdge {
+                    from: parent.unique_id.clone(),
+                    from_name: parent.name.clone(),
+                    to: exposure.unique_id.clone(),
+                    to_name: exposure.name.clone(),
+                })
+            })
+        }));
         dbt_models.sort();
         dbt_exposures.sort();
+        dbt_lineage.sort();
         ImpactReport {
             dbt_models,
             dbt_exposures,
+            dbt_lineage,
             ..ImpactReport::default()
         }
     }
+
+    pub fn lineage_changes(&self, production: &Manifest) -> Vec<LineageChange> {
+        let current_edges = self.direct_lineage_edges();
+        let production_edges = production.direct_lineage_edges();
+        let current_keys = current_edges.keys().cloned().collect::<BTreeSet<_>>();
+        let production_keys = production_edges.keys().cloned().collect::<BTreeSet<_>>();
+        let mut changes = current_keys
+            .difference(&production_keys)
+            .filter_map(|key| current_edges.get(key))
+            .cloned()
+            .map(|edge| LineageChange {
+                change: LineageChangeKind::Added,
+                edge,
+            })
+            .chain(
+                production_keys
+                    .difference(&current_keys)
+                    .filter_map(|key| production_edges.get(key))
+                    .cloned()
+                    .map(|edge| LineageChange {
+                        change: LineageChangeKind::Removed,
+                        edge,
+                    }),
+            )
+            .collect::<Vec<_>>();
+        changes.sort();
+        changes
+    }
+
+    fn direct_lineage_edges(&self) -> BTreeMap<(String, String), LineageEdge> {
+        let mut edges = self
+            .nodes
+            .values()
+            .filter(|node| node.resource_type == "model")
+            .flat_map(|node| {
+                node.depends_on.nodes.iter().map(move |dependency| {
+                    let from_name = self
+                        .nodes
+                        .get(dependency)
+                        .map(|parent| parent.name.clone())
+                        .unwrap_or_else(|| short_dbt_name(dependency));
+                    (
+                        (dependency.clone(), node.unique_id.clone()),
+                        LineageEdge {
+                            from: dependency.clone(),
+                            from_name,
+                            to: node.unique_id.clone(),
+                            to_name: node.name.clone(),
+                        },
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        edges.extend(self.exposures.values().flat_map(|exposure| {
+            exposure.depends_on.nodes.iter().map(move |dependency| {
+                let from_name = self
+                    .nodes
+                    .get(dependency)
+                    .map(|parent| parent.name.clone())
+                    .unwrap_or_else(|| short_dbt_name(dependency));
+                (
+                    (dependency.clone(), exposure.unique_id.clone()),
+                    LineageEdge {
+                        from: dependency.clone(),
+                        from_name,
+                        to: exposure.unique_id.clone(),
+                        to_name: exposure.name.clone(),
+                    },
+                )
+            })
+        }));
+        edges
+    }
+}
+
+fn short_dbt_name(unique_id: &str) -> String {
+    unique_id.rsplit('.').next().unwrap_or(unique_id).to_owned()
 }
 
 pub fn prepare(
@@ -438,15 +663,14 @@ impl Drop for DbtContext {
     }
 }
 
-pub fn select_models(
+pub fn select_changed_models(
     config: &Config,
     context: &DbtContext,
     account: &AccountConfig,
     changed_paths: &[String],
 ) -> Result<BTreeSet<String>> {
     let manifest = context.manifest(&account.name)?;
-    let production_manifest = context.production_manifest(&account.name)?;
-    let mut selector = String::from("state:modified+");
+    let mut selector = String::from("state:modified");
     if let Some(account_selector) = &account.selector {
         selector.push(',');
         selector.push_str(account_selector);
@@ -497,19 +721,6 @@ pub fn select_models(
     )?;
     selected.extend(manifest.model_dependencies(&unique_ids(&modified_tests)?));
 
-    let removed = production_manifest.removed_models(manifest);
-    selected.extend(
-        production_manifest
-            .descendants(&removed)
-            .into_iter()
-            .filter(|id| {
-                manifest
-                    .nodes
-                    .get(id)
-                    .is_some_and(|node| node.resource_type == "model")
-            }),
-    );
-
     for mapping in &config.external_changes {
         let matcher = Glob::new(&mapping.path)
             .with_context(|| format!("invalid external change glob {}", mapping.path))?
@@ -519,7 +730,7 @@ pub fn select_models(
                 let id = manifest.node_id(configured).with_context(|| {
                     format!("external change model {configured} is missing or ambiguous")
                 })?;
-                selected.extend(manifest.descendants(&BTreeSet::from([id])));
+                selected.insert(id);
             }
         }
     }
@@ -555,6 +766,14 @@ pub fn select_models(
     Ok(selected)
 }
 
+fn is_simple_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
 fn unique_ids(output: &str) -> Result<BTreeSet<String>> {
     let mut ids = BTreeSet::new();
     for line in output.lines().filter(|line| !line.trim().is_empty()) {
@@ -578,6 +797,7 @@ pub fn build_models(
     context: &DbtContext,
     account: &AccountConfig,
     selected: &BTreeSet<String>,
+    full_refresh: bool,
 ) -> Result<BuildResult> {
     if selected.is_empty() {
         return Ok(BuildResult {
@@ -596,8 +816,11 @@ pub fn build_models(
         "--fail-fast".to_owned(),
         "--target-path".to_owned(),
         path_str(&target_path)?.to_owned(),
-        "--select".to_owned(),
     ];
+    if full_refresh {
+        owned.push("--full-refresh".to_owned());
+    }
+    owned.push("--select".to_owned());
     let manifest = context.manifest(&account.name)?;
     for id in selected {
         let node = manifest
@@ -708,33 +931,6 @@ pub fn ci_schema_name(prefix: &str, repo: &Path) -> Result<String> {
         timestamp,
         random.to_ascii_uppercase()
     ))
-}
-
-pub fn coverage_gaps(manifest: &Manifest, selected: &BTreeSet<String>) -> Vec<CoverageGap> {
-    selected
-        .iter()
-        .filter_map(|id| manifest.nodes.get(id))
-        .filter(|node| {
-            manifest
-                .child_map
-                .get(&node.unique_id)
-                .into_iter()
-                .flatten()
-                .any(|child| {
-                    manifest
-                        .nodes
-                        .get(child)
-                        .is_some_and(|child_node| child_node.resource_type == "model")
-                })
-        })
-        .map(|node| CoverageGap {
-            scope: node.unique_id.clone(),
-            check: "column_lineage".into(),
-            reason:
-                "dbt manifest artifacts do not contain authoritative column-level dependency edges"
-                    .into(),
-        })
-        .collect()
 }
 
 struct WorktreeRegistration {
@@ -930,6 +1126,7 @@ mod tests {
             schema: "s".into(),
             alias: id.into(),
             fqn: vec!["test".into(), id.into()],
+            tags: vec![],
             depends_on: DependsOn::default(),
             config: NodeConfig::default(),
         }
@@ -953,6 +1150,170 @@ mod tests {
             manifest.descendants(&BTreeSet::from(["a".into()])),
             BTreeSet::from(["a".into(), "b".into(), "c".into()])
         );
+    }
+
+    #[test]
+    fn critical_selection_keeps_every_path_through_a_diamond() {
+        let mut left = node("left");
+        left.depends_on.nodes = vec!["root".into()];
+        let mut right = node("right");
+        right.depends_on.nodes = vec!["root".into()];
+        let mut critical = node("critical");
+        critical.tags = vec!["tier_1".into()];
+        critical.depends_on.nodes = vec!["left".into(), "right".into()];
+        let manifest = Manifest {
+            nodes: BTreeMap::from([
+                ("root".into(), node("root")),
+                ("left".into(), left),
+                ("right".into(), right),
+                ("critical".into(), critical),
+            ]),
+            exposures: BTreeMap::new(),
+            child_map: BTreeMap::from([
+                ("root".into(), vec!["left".into(), "right".into()]),
+                ("left".into(), vec!["critical".into()]),
+                ("right".into(), vec!["critical".into()]),
+            ]),
+        };
+        let roots = BTreeSet::from(["root".into()]);
+        let impacted = manifest.model_descendants(&roots);
+        let targets = manifest.critical_targets(
+            &impacted,
+            &BTreeSet::from(["tier_1".into()]),
+            &BTreeSet::new(),
+        );
+        assert_eq!(
+            manifest.paths_between(&roots, &targets),
+            BTreeSet::from([
+                "root".into(),
+                "left".into(),
+                "right".into(),
+                "critical".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn models_directly_supporting_exposures_are_critical() {
+        let manifest = Manifest {
+            nodes: BTreeMap::from([("dashboard_model".into(), node("dashboard_model"))]),
+            exposures: BTreeMap::from([(
+                "exposure.dashboard".into(),
+                Exposure {
+                    unique_id: "exposure.dashboard".into(),
+                    name: "dashboard".into(),
+                    url: None,
+                    depends_on: DependsOn {
+                        nodes: vec!["dashboard_model".into()],
+                    },
+                },
+            )]),
+            child_map: BTreeMap::new(),
+        };
+        let impacted = BTreeSet::from(["dashboard_model".into()]);
+        assert_eq!(
+            manifest.critical_targets(&impacted, &BTreeSet::new(), &BTreeSet::new()),
+            impacted
+        );
+    }
+
+    #[test]
+    fn simple_dbt_unique_keys_are_inferred_but_expressions_are_rejected() {
+        let mut scalar = node("scalar");
+        scalar.config.unique_key = Some(Value::String("order_id".into()));
+        let mut composite = node("composite");
+        composite.config.unique_key = Some(serde_json::json!(["order_id", "line_id"]));
+        let mut expression = node("expression");
+        expression.config.unique_key = Some(Value::String("coalesce(order_id, -1)".into()));
+        let manifest = Manifest {
+            nodes: BTreeMap::from([
+                ("scalar".into(), scalar),
+                ("composite".into(), composite),
+                ("expression".into(), expression),
+            ]),
+            exposures: BTreeMap::new(),
+            child_map: BTreeMap::new(),
+        };
+        assert_eq!(
+            manifest.inferred_primary_key("scalar").unwrap(),
+            Some(vec!["order_id".into()])
+        );
+        assert_eq!(
+            manifest.inferred_primary_key("composite").unwrap(),
+            Some(vec!["order_id".into(), "line_id".into()])
+        );
+        assert!(manifest.inferred_primary_key("expression").is_err());
+    }
+
+    #[test]
+    fn impact_contains_model_and_exposure_edges() {
+        let mut summary = node("model.project.summary");
+        summary.depends_on.nodes = vec!["model.project.orders".into()];
+        let manifest = Manifest {
+            nodes: BTreeMap::from([
+                ("model.project.orders".into(), node("model.project.orders")),
+                ("model.project.summary".into(), summary),
+            ]),
+            exposures: BTreeMap::from([(
+                "exposure.project.dashboard".into(),
+                Exposure {
+                    unique_id: "exposure.project.dashboard".into(),
+                    name: "dashboard".into(),
+                    url: None,
+                    depends_on: DependsOn {
+                        nodes: vec!["model.project.summary".into()],
+                    },
+                },
+            )]),
+            child_map: BTreeMap::from([(
+                "model.project.orders".into(),
+                vec!["model.project.summary".into()],
+            )]),
+        };
+
+        let impact = manifest.impact(&BTreeSet::from(["model.project.orders".into()]));
+        assert!(impact.dbt_lineage.iter().any(|edge| {
+            edge.from == "model.project.orders" && edge.to == "model.project.summary"
+        }));
+        assert!(impact.dbt_lineage.iter().any(|edge| {
+            edge.from == "model.project.summary" && edge.to == "exposure.project.dashboard"
+        }));
+    }
+
+    #[test]
+    fn lineage_changes_compare_current_and_production_edges() {
+        let mut production_summary = node("model.project.summary");
+        production_summary.depends_on.nodes = vec!["model.project.orders".into()];
+        let production = Manifest {
+            nodes: BTreeMap::from([
+                ("model.project.orders".into(), node("model.project.orders")),
+                ("model.project.summary".into(), production_summary),
+            ]),
+            exposures: BTreeMap::new(),
+            child_map: BTreeMap::new(),
+        };
+        let mut current_summary = node("model.project.summary");
+        current_summary.depends_on.nodes = vec!["model.project.refunds".into()];
+        let current = Manifest {
+            nodes: BTreeMap::from([
+                (
+                    "model.project.refunds".into(),
+                    node("model.project.refunds"),
+                ),
+                ("model.project.summary".into(), current_summary),
+            ]),
+            exposures: BTreeMap::new(),
+            child_map: BTreeMap::new(),
+        };
+
+        let changes = current.lineage_changes(&production);
+        assert!(changes.iter().any(|change| {
+            change.change == LineageChangeKind::Added && change.edge.from == "model.project.refunds"
+        }));
+        assert!(changes.iter().any(|change| {
+            change.change == LineageChangeKind::Removed
+                && change.edge.from == "model.project.orders"
+        }));
     }
 
     #[test]

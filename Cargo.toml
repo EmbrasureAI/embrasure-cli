@@ -1,6 +1,6 @@
 [package]
 name = "embrasure-cli"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Embrasure CLI for validating dbt changes against production Snowflake data"
@@ -36,6 +36,7 @@ webbrowser = "1.0"
 
 [dev-dependencies]
 assert_cmd = "2.0"
+jsonschema = { version = "0.33", default-features = false }
 predicates = "3.1"
 
 [profile.release]

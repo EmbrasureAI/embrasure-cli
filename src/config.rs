@@ -16,6 +16,10 @@ pub struct Config {
     #[serde(default)]
     pub safety: SafetyConfig,
     #[serde(default)]
+    pub comparison: ComparisonConfig,
+    #[serde(default)]
+    pub validation: ValidationConfig,
+    #[serde(default)]
     pub thresholds: Thresholds,
     pub accounts: Vec<AccountConfig>,
     #[serde(default)]
@@ -66,6 +70,73 @@ pub struct SafetyConfig {
     pub max_columns_per_model: usize,
     #[serde(default = "default_pk_limit")]
     pub primary_key_sample_limit: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComparisonConfig {
+    #[serde(default)]
+    pub mode: ComparisonMode,
+    #[serde(default = "default_comparison_concurrency")]
+    pub concurrency: usize,
+    #[serde(default = "default_comparison_timeout")]
+    pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationConfig {
+    #[serde(default)]
+    pub downstream: DownstreamPolicy,
+    #[serde(default = "default_critical_tags")]
+    pub critical_tags: Vec<String>,
+    #[serde(default)]
+    pub incremental_mode: IncrementalMode,
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            downstream: DownstreamPolicy::default(),
+            critical_tags: default_critical_tags(),
+            incremental_mode: IncrementalMode::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownstreamPolicy {
+    None,
+    #[default]
+    Critical,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IncrementalMode {
+    #[default]
+    Clone,
+    FullRefresh,
+}
+
+impl Default for ComparisonConfig {
+    fn default() -> Self {
+        Self {
+            mode: ComparisonMode::default(),
+            concurrency: default_comparison_concurrency(),
+            timeout_seconds: default_comparison_timeout(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonMode {
+    Quick,
+    #[default]
+    Deep,
 }
 
 impl Default for SafetyConfig {
@@ -144,6 +215,49 @@ pub struct ModelConfig {
     pub primary_key: Vec<String>,
     #[serde(default)]
     pub allow_removal: bool,
+    #[serde(default)]
+    pub critical: bool,
+    #[serde(default)]
+    pub key_policy: KeyPolicy,
+    #[serde(default)]
+    pub thresholds: ThresholdOverrides,
+    /// Optional SQL predicate applied to both CI and production comparisons.
+    #[serde(default, rename = "where")]
+    pub where_clause: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyPolicy {
+    #[default]
+    Regression,
+    Strict,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThresholdOverrides {
+    pub row_count_relative: Option<f64>,
+    pub null_rate_absolute: Option<f64>,
+    pub cardinality_relative: Option<f64>,
+    pub numeric_relative: Option<f64>,
+}
+
+impl ThresholdOverrides {
+    pub fn apply(&self, defaults: Thresholds) -> Thresholds {
+        Thresholds {
+            row_count_relative: self
+                .row_count_relative
+                .unwrap_or(defaults.row_count_relative),
+            null_rate_absolute: self
+                .null_rate_absolute
+                .unwrap_or(defaults.null_rate_absolute),
+            cardinality_relative: self
+                .cardinality_relative
+                .unwrap_or(defaults.cardinality_relative),
+            numeric_relative: self.numeric_relative.unwrap_or(defaults.numeric_relative),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -209,6 +323,20 @@ impl Config {
         }
         if self.safety.statement_timeout_seconds > 604_800 {
             bail!("statement timeout must not exceed Snowflake's 604800-second maximum");
+        }
+        if self.comparison.concurrency == 0 || self.comparison.concurrency > 32 {
+            bail!("comparison.concurrency must be between 1 and 32");
+        }
+        if self.comparison.timeout_seconds == 0 || self.comparison.timeout_seconds > 604_800 {
+            bail!("comparison.timeout_seconds must be between 1 and 604800");
+        }
+        if self
+            .validation
+            .critical_tags
+            .iter()
+            .any(|tag| tag.trim().is_empty())
+        {
+            bail!("validation.critical_tags must not contain empty tags");
         }
         if self.safety.schema_prefix.is_empty()
             || self.safety.schema_prefix.len() > 200
@@ -313,6 +441,27 @@ impl Config {
                 bail!("metabase.api_key_env must not be empty");
             }
         }
+        for (model, config) in &self.models {
+            if let Some(predicate) = &config.where_clause
+                && (predicate.trim().is_empty()
+                    || predicate.contains(';')
+                    || predicate.contains("--")
+                    || predicate.contains("/*")
+                    || predicate.contains("*/"))
+            {
+                bail!(
+                    "models.{model}.where must be one non-empty SQL predicate without comments or semicolons"
+                );
+            }
+            let effective = config.thresholds.apply(self.thresholds);
+            if !valid_rate(effective.row_count_relative)
+                || !valid_rate(effective.null_rate_absolute)
+                || !valid_rate(effective.cardinality_relative)
+                || !valid_rate(effective.numeric_relative)
+            {
+                bail!("models.{model}.thresholds must be finite non-negative numbers");
+            }
+        }
         Ok(())
     }
 
@@ -388,6 +537,15 @@ fn default_max_columns() -> usize {
 }
 fn default_pk_limit() -> usize {
     20
+}
+fn default_comparison_concurrency() -> usize {
+    4
+}
+fn default_comparison_timeout() -> u64 {
+    900
+}
+fn default_critical_tags() -> Vec<String> {
+    vec!["critical".into()]
 }
 fn default_row_threshold() -> f64 {
     0.001
@@ -533,6 +691,42 @@ accounts:
         assert_eq!(
             private_key_path,
             &directory.path().join("config/secrets/key.p8")
+        );
+    }
+
+    #[test]
+    fn comparison_limits_and_model_filters_are_validated() {
+        let yaml = r#"
+version: 1
+comparison:
+  mode: quick
+  concurrency: 4
+  timeout_seconds: 600
+accounts:
+  - name: primary
+    account: org-account
+    user: ci
+    role: ci
+    database: analytics
+    warehouse: ci
+    production_schema: prod
+    auth: { type: oauth_local }
+models:
+  model.analytics.orders:
+    where: "order_date >= current_date - 30"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.comparison.mode, ComparisonMode::Quick);
+
+        let invalid = yaml.replace("current_date - 30", "current_date; DROP SCHEMA PROD");
+        let config: Config = serde_yaml::from_str(&invalid).unwrap();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("predicate")
         );
     }
 }

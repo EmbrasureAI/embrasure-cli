@@ -11,7 +11,74 @@ mod snowflake;
 
 use std::{path::PathBuf, process::ExitCode};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+use crate::config::ComparisonMode;
+use crate::config::{DownstreamPolicy, IncrementalMode};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ModeArg {
+    Quick,
+    Deep,
+}
+
+impl From<ModeArg> for ComparisonMode {
+    fn from(value: ModeArg) -> Self {
+        match value {
+            ModeArg::Quick => Self::Quick,
+            ModeArg::Deep => Self::Deep,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DownstreamArg {
+    None,
+    Critical,
+    All,
+}
+
+impl From<DownstreamArg> for DownstreamPolicy {
+    fn from(value: DownstreamArg) -> Self {
+        match value {
+            DownstreamArg::None => Self::None,
+            DownstreamArg::Critical => Self::Critical,
+            DownstreamArg::All => Self::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum IncrementalModeArg {
+    Clone,
+    FullRefresh,
+}
+
+impl From<IncrementalModeArg> for IncrementalMode {
+    fn from(value: IncrementalModeArg) -> Self {
+        match value {
+            IncrementalModeArg::Clone => Self::Clone,
+            IncrementalModeArg::FullRefresh => Self::FullRefresh,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ReportVersionArg {
+    #[value(name = "1")]
+    V1,
+    #[value(name = "2")]
+    V2,
+}
+
+impl ReportVersionArg {
+    fn number(self) -> u8 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 => 2,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -64,6 +131,24 @@ enum Command {
         /// Also write a deterministic Markdown report.
         #[arg(long, value_name = "PATH")]
         markdown: Option<PathBuf>,
+        /// Validation depth. Quick skips percentiles and estimates cardinality.
+        #[arg(long, value_enum)]
+        mode: Option<ModeArg>,
+        /// Downstream validation scope. Full impact is always reported.
+        #[arg(long, value_enum)]
+        downstream: Option<DownstreamArg>,
+        /// Replace configured critical tags. Repeat for multiple tags.
+        #[arg(long = "critical-tag")]
+        critical_tags: Vec<String>,
+        /// How existing incremental models are built for validation.
+        #[arg(long, value_enum)]
+        incremental_mode: Option<IncrementalModeArg>,
+        /// JSON report contract version.
+        #[arg(long, value_enum, requires = "json")]
+        report_version: Option<ReportVersionArg>,
+        /// Show every finding and impacted lineage node.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Check local tools, credentials, Snowflake permissions, and optional Metabase access.
     Doctor {
@@ -149,9 +234,25 @@ async fn main() -> ExitCode {
             config,
             json,
             markdown,
+            mode,
+            downstream,
+            critical_tags,
+            incremental_mode,
+            report_version,
+            verbose,
         } => {
             eprintln!("embrasure: validating changes against {base}");
-            let mut report = run::run_check(&config, &base).await;
+            let mut report = run::run_check(
+                &config,
+                &base,
+                run::CheckOptions {
+                    mode: mode.map(Into::into),
+                    downstream: downstream.map(Into::into),
+                    critical_tags: (!critical_tags.is_empty()).then_some(critical_tags),
+                    incremental_mode: incremental_mode.map(Into::into),
+                },
+            )
+            .await;
             if let Some(path) = markdown
                 && let Err(error) = report.write_markdown(&path)
             {
@@ -161,7 +262,7 @@ async fn main() -> ExitCode {
                 report.finalize();
             }
             if json {
-                match serde_json::to_string_pretty(&report) {
+                match report.json(report_version.unwrap_or(ReportVersionArg::V2).number()) {
                     Ok(value) => println!("{value}"),
                     Err(error) => {
                         eprintln!("embrasure: could not serialize JSON report: {error}");
@@ -169,7 +270,7 @@ async fn main() -> ExitCode {
                     }
                 }
             } else {
-                print!("{}", report.human());
+                print!("{}", report.human(verbose));
             }
             ExitCode::from(report.exit_code)
         }

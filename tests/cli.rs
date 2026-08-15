@@ -147,3 +147,44 @@ fn run_remains_an_alias_for_check() {
             "Build and compare changed dbt models",
         ));
 }
+
+#[test]
+fn check_exposes_quick_and_deep_modes() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--mode <MODE>"))
+        .stdout(predicate::str::contains("quick"))
+        .stdout(predicate::str::contains("deep"));
+}
+
+#[test]
+fn check_exposes_scope_incremental_and_report_controls() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--downstream <DOWNSTREAM>"))
+        .stdout(predicate::str::contains("--critical-tag <CRITICAL_TAGS>"))
+        .stdout(predicate::str::contains(
+            "--incremental-mode <INCREMENTAL_MODE>",
+        ))
+        .stdout(predicate::str::contains(
+            "--report-version <REPORT_VERSION>",
+        ))
+        .stdout(predicate::str::contains("possible values: 1, 2"))
+        .stdout(predicate::str::contains("--verbose"));
+}
+
+#[test]
+fn legacy_report_version_requires_json_output() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--report-version", "1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--json"));
+}

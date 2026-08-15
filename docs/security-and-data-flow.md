@@ -36,8 +36,8 @@ Snowflake returns the comparison evidence used in the local report:
 - Database, schema, table, and column names
 - Snowflake types
 - Row counts, null rates, cardinality, min/max values, averages, and percentiles
-- Counts of primary-key values found on only one side
-- Optional primary-key examples, up to `safety.primary_key_sample_limit`
+- Counts of primary-key values found on only one side, duplicate rows, and null-key rows
+- Optional deterministic primary-key and duplicate-key examples, up to `safety.primary_key_sample_limit`
 
 Set `primary_key_sample_limit: 0` when key values must not appear in process memory or JSON output. Reports are written to stdout unless `--markdown <path>` is provided.
 
@@ -57,13 +57,16 @@ Use a dedicated role and warehouse. The role needs:
 
 - `USAGE` on the validation warehouse and database
 - Read access only to the production relations under test
-- Permission to create and drop temporary schemas in the configured validation database
+- `SELECT` on production tables that must be zero-copy cloned
+- Permission to create temporary run-owned schemas in every database containing selected models
 
-The [enterprise setup guide](enterprise.md) contains example grants. `embrasure doctor --read-only` checks authentication and production visibility without creating a schema. A normal check must create and remove its validation schema.
+The [enterprise setup guide](enterprise.md) contains example grants. `embrasure doctor --read-only` checks authentication and production visibility without creating a schema. A normal `doctor` run also proves that a visible production table can be cloned. A normal check creates and removes candidate and baseline schemas.
+
+Incremental baselines use Snowflake table-level zero-copy clones. Embrasure never seeds them with CTAS, `INSERT`, or a local data copy. Clone metadata remains in Snowflake; only aggregate comparison results and bounded examples return to the local process.
 
 ## Schema cleanup
 
-Each run uses a unique schema name and writes an ownership marker to that schema. Cleanup requires both the expected name prefix and matching marker. The CLI refuses to drop a schema that fails either check.
+Each run uses unique candidate and baseline schema names and writes an ownership marker to every schema. Cleanup requires both the exact run namespace and matching marker. The CLI refuses to drop a schema that fails either check.
 
 Cleanup is attempted after success, findings, execution failures, Ctrl-C, and normal termination signals. No process can clean up after `SIGKILL`, a machine crash, or power loss. Administrators should periodically remove stale schemas with the configured prefix after confirming their ownership markers.
 
@@ -74,7 +77,7 @@ Releases include native archives for macOS and Linux on Intel and ARM, a `SHA256
 Verify an archive checksum:
 
 ```sh
-archive=embrasure-0.3.2-aarch64-apple-darwin.tar.gz
+archive=embrasure-0.4.0-aarch64-apple-darwin.tar.gz
 grep " ${archive}$" SHA256SUMS | shasum -a 256 --check
 ```
 
