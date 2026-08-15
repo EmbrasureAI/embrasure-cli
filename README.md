@@ -30,11 +30,10 @@ Install the CLI on macOS or Linux:
 brew install embrasureai/tap/embrasure
 ```
 
-Create `embrasure-check.yml` in your dbt project from the [example configuration](embrasure-check.example.yml), then add your Snowflake account, user, role, database, warehouse, and production schema.
-
-Sign in, verify access, and run a check:
+From your dbt project, run the guided setup. It reads your existing dbt profile and only asks for anything it cannot find.
 
 ```sh
+embrasure init
 embrasure auth login
 embrasure doctor
 embrasure check --base origin/main
@@ -73,20 +72,9 @@ Do not request review until it exits 0.
 | `2` | A requested check could not be completed |
 | `3` | Setup, execution, or cleanup failed |
 
-## Configuration
+## Advanced setup
 
-Start with [`embrasure-check.example.yml`](embrasure-check.example.yml). It includes thresholds, primary keys, non-dbt file mappings, multiple Snowflake accounts, cross-account dependencies, and Metabase.
-
-Download it directly into your dbt project:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/v0.3.2/embrasure-check.example.yml \
-  -o embrasure-check.yml
-```
-
-For least-privilege grants and non-interactive authentication, see the [enterprise setup guide](docs/enterprise.md).
-
-The configuration filename and credential-cache path keep the `embrasure-check` name for compatibility. `embrasure run` also remains available as an alias for `embrasure check`.
+The guided setup creates the smallest configuration needed for one Snowflake account. For service credentials, multiple accounts, primary keys, custom thresholds, non-dbt changes, cross-account dependencies, or Metabase, use the [example configuration](embrasure-check.example.yml) and [enterprise setup guide](docs/enterprise.md).
 
 ## Safety
 

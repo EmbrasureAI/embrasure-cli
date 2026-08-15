@@ -3,6 +3,7 @@ mod compare;
 mod config;
 mod dbt;
 mod doctor;
+mod init;
 mod metabase;
 mod report;
 mod run;
@@ -25,6 +26,29 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Create a minimal configuration for the current dbt project.
+    Init {
+        /// Configuration file to create.
+        #[arg(long, default_value = "embrasure-check.yml")]
+        config: PathBuf,
+        /// Replace an existing configuration file.
+        #[arg(long)]
+        force: bool,
+        #[arg(long, hide = true)]
+        profile: Option<String>,
+        #[arg(long, hide = true)]
+        account: Option<String>,
+        #[arg(long, hide = true)]
+        user: Option<String>,
+        #[arg(long, hide = true)]
+        role: Option<String>,
+        #[arg(long, hide = true)]
+        database: Option<String>,
+        #[arg(long, hide = true)]
+        warehouse: Option<String>,
+        #[arg(long, hide = true)]
+        production_schema: Option<String>,
+    },
     /// Build and compare changed dbt models.
     #[command(alias = "run")]
     Check {
@@ -91,6 +115,35 @@ enum AuthCommand {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Init {
+            config,
+            force,
+            profile,
+            account,
+            user,
+            role,
+            database,
+            warehouse,
+            production_schema,
+        } => match init::run(
+            &config,
+            force,
+            init::Options {
+                profile,
+                account,
+                user,
+                role,
+                database,
+                warehouse,
+                production_schema,
+            },
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("embrasure: {error:#}");
+                ExitCode::from(report::EXIT_EXECUTION)
+            }
+        },
         Command::Check {
             base,
             config,
