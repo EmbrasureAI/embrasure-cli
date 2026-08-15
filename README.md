@@ -21,6 +21,8 @@ Install the prebuilt CLI on macOS or Linux:
 brew install embrasureai/tap/embrasure
 ```
 
+If you previously installed `@embrasure/cli` with npm, uninstall it first with `npm uninstall -g @embrasure/cli` so the two executables do not conflict.
+
 Signed Intel and ARM downloads are also available on the [releases page](https://github.com/EmbrasureAI/embrasure-cli/releases). Each release includes SHA-256 checksums, an SPDX software bill of materials, and GitHub build-provenance attestations.
 
 Download the example configuration into your dbt project:
