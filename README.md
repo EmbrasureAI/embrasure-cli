@@ -11,37 +11,32 @@ Embrasure builds the dbt models changed on your branch and their downstream depe
 
 Use it locally or in CI. It connects directly to Snowflake, so no Embrasure account or hosted service is required.
 
-## Quick start
+## What it catches
 
-You need Git and dbt Core with the Snowflake adapter. Rust is not required.
+- Columns added, removed, renamed, or changed to an incompatible type
+- Unexpected shifts in row counts, null rates, cardinality, ranges, averages, and percentiles
+- Primary-key values that appear or disappear
+- Failures in your existing dbt tests
+- Downstream dbt models, exposures, cross-account dependencies, and optional Metabase dashboards affected by the change
+- Models affected by non-dbt changes you map in the configuration
 
-Install the prebuilt CLI on macOS or Linux:
+## Run it locally
+
+You need Git and dbt Core with the Snowflake adapter. You do not need Rust or an Embrasure account.
+
+Install the CLI on macOS or Linux:
 
 ```sh
 brew install embrasureai/tap/embrasure
 ```
 
-If you previously installed `@embrasure/cli` with npm, uninstall it first with `npm uninstall -g @embrasure/cli` so the two executables do not conflict.
+Create `embrasure-check.yml` in your dbt project from the [example configuration](embrasure-check.example.yml), then add your Snowflake account, user, role, database, warehouse, and production schema.
 
-Signed Intel and ARM downloads are also available on the [releases page](https://github.com/EmbrasureAI/embrasure-cli/releases). Each release includes SHA-256 checksums, an SPDX software bill of materials, and GitHub build-provenance attestations.
-
-Download the example configuration into your dbt project:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/v0.3.2/embrasure-check.example.yml \
-  -o embrasure-check.yml
-```
-
-Update the Snowflake account, user, role, database, warehouse, and production schema in `embrasure-check.yml`. Then sign in and verify access:
+Sign in, verify access, and run a check:
 
 ```sh
 embrasure auth login
 embrasure doctor
-```
-
-Run a check from the dbt project root:
-
-```sh
 embrasure check --base origin/main
 ```
 
@@ -51,17 +46,6 @@ Example result:
 embrasure: PASS
 2 selected · 2 built · 2 compared · 0 findings · 0 coverage gaps
 ```
-
-## What it checks
-
-- Modified dbt models and their downstream dependents
-- Existing dbt tests through `dbt build`
-- Added, removed, or changed columns and Snowflake types
-- Row counts, null rates, cardinality, ranges, averages, and percentiles
-- Added or removed primary-key values when keys are configured
-- Downstream dbt models, exposures, declared cross-account dependencies, and optional Metabase dashboards
-
-Changes outside dbt can be mapped to affected models in the configuration file.
 
 ## Use it with an agent or CI
 
@@ -93,6 +77,13 @@ Do not request review until it exits 0.
 
 Start with [`embrasure-check.example.yml`](embrasure-check.example.yml). It includes thresholds, primary keys, non-dbt file mappings, multiple Snowflake accounts, cross-account dependencies, and Metabase.
 
+Download it directly into your dbt project:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/v0.3.2/embrasure-check.example.yml \
+  -o embrasure-check.yml
+```
+
 For least-privilege grants and non-interactive authentication, see the [enterprise setup guide](docs/enterprise.md).
 
 The configuration filename and credential-cache path keep the `embrasure-check` name for compatibility. `embrasure run` also remains available as an alias for `embrasure check`.
@@ -104,6 +95,12 @@ Embrasure uses a dedicated warehouse, query tags, statement timeouts, and a conf
 Use a Snowflake role that can read the production relations under test and create temporary schemas in the configured CI database. Credentials are never written to reports or normal terminal output.
 
 See [Security and data flow](docs/security-and-data-flow.md) for the exact network connections, local files, data returned from Snowflake, credential handling, cleanup behavior, and release-verification steps.
+
+## Releases
+
+Intel and ARM downloads for macOS and Linux are available on the [releases page](https://github.com/EmbrasureAI/embrasure-cli/releases). Each release includes SHA-256 checksums, an SPDX software bill of materials, and GitHub-signed build-provenance attestations.
+
+If you previously installed `@embrasure/cli` with npm, uninstall it first with `npm uninstall -g @embrasure/cli` so the two executables do not conflict.
 
 ## Current limits
 
