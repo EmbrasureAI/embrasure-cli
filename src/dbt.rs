@@ -16,7 +16,9 @@ use uuid::Uuid;
 use crate::{
     auth::ResolvedAuth,
     config::{AccountConfig, Config},
-    report::{CoverageGap, ImpactReport, ImpactedAsset},
+    report::{
+        CoverageGap, ImpactReport, ImpactedAsset, LineageChange, LineageChangeKind, LineageEdge,
+    },
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -222,14 +224,122 @@ impl Manifest {
                 url: exposure.url.clone(),
             })
             .collect::<Vec<_>>();
+        let mut dbt_lineage = self
+            .nodes
+            .values()
+            .filter(|node| node.resource_type == "model" && downstream.contains(&node.unique_id))
+            .flat_map(|node| {
+                node.depends_on.nodes.iter().filter_map(|dependency| {
+                    let parent = self.nodes.get(dependency)?;
+                    (parent.resource_type == "model" && downstream.contains(dependency)).then(
+                        || LineageEdge {
+                            from: parent.unique_id.clone(),
+                            from_name: parent.name.clone(),
+                            to: node.unique_id.clone(),
+                            to_name: node.name.clone(),
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        dbt_lineage.extend(self.exposures.values().flat_map(|exposure| {
+            exposure.depends_on.nodes.iter().filter_map(|dependency| {
+                let parent = self.nodes.get(dependency)?;
+                downstream.contains(dependency).then(|| LineageEdge {
+                    from: parent.unique_id.clone(),
+                    from_name: parent.name.clone(),
+                    to: exposure.unique_id.clone(),
+                    to_name: exposure.name.clone(),
+                })
+            })
+        }));
         dbt_models.sort();
         dbt_exposures.sort();
+        dbt_lineage.sort();
         ImpactReport {
             dbt_models,
             dbt_exposures,
+            dbt_lineage,
             ..ImpactReport::default()
         }
     }
+
+    pub fn lineage_changes(&self, production: &Manifest) -> Vec<LineageChange> {
+        let current_edges = self.direct_lineage_edges();
+        let production_edges = production.direct_lineage_edges();
+        let current_keys = current_edges.keys().cloned().collect::<BTreeSet<_>>();
+        let production_keys = production_edges.keys().cloned().collect::<BTreeSet<_>>();
+        let mut changes = current_keys
+            .difference(&production_keys)
+            .filter_map(|key| current_edges.get(key))
+            .cloned()
+            .map(|edge| LineageChange {
+                change: LineageChangeKind::Added,
+                edge,
+            })
+            .chain(
+                production_keys
+                    .difference(&current_keys)
+                    .filter_map(|key| production_edges.get(key))
+                    .cloned()
+                    .map(|edge| LineageChange {
+                        change: LineageChangeKind::Removed,
+                        edge,
+                    }),
+            )
+            .collect::<Vec<_>>();
+        changes.sort();
+        changes
+    }
+
+    fn direct_lineage_edges(&self) -> BTreeMap<(String, String), LineageEdge> {
+        let mut edges = self
+            .nodes
+            .values()
+            .filter(|node| node.resource_type == "model")
+            .flat_map(|node| {
+                node.depends_on.nodes.iter().map(move |dependency| {
+                    let from_name = self
+                        .nodes
+                        .get(dependency)
+                        .map(|parent| parent.name.clone())
+                        .unwrap_or_else(|| short_dbt_name(dependency));
+                    (
+                        (dependency.clone(), node.unique_id.clone()),
+                        LineageEdge {
+                            from: dependency.clone(),
+                            from_name,
+                            to: node.unique_id.clone(),
+                            to_name: node.name.clone(),
+                        },
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        edges.extend(self.exposures.values().flat_map(|exposure| {
+            exposure.depends_on.nodes.iter().map(move |dependency| {
+                let from_name = self
+                    .nodes
+                    .get(dependency)
+                    .map(|parent| parent.name.clone())
+                    .unwrap_or_else(|| short_dbt_name(dependency));
+                (
+                    (dependency.clone(), exposure.unique_id.clone()),
+                    LineageEdge {
+                        from: dependency.clone(),
+                        from_name,
+                        to: exposure.unique_id.clone(),
+                        to_name: exposure.name.clone(),
+                    },
+                )
+            })
+        }));
+        edges
+    }
+}
+
+fn short_dbt_name(unique_id: &str) -> String {
+    unique_id.rsplit('.').next().unwrap_or(unique_id).to_owned()
 }
 
 pub fn prepare(
@@ -953,6 +1063,77 @@ mod tests {
             manifest.descendants(&BTreeSet::from(["a".into()])),
             BTreeSet::from(["a".into(), "b".into(), "c".into()])
         );
+    }
+
+    #[test]
+    fn impact_contains_model_and_exposure_edges() {
+        let mut summary = node("model.project.summary");
+        summary.depends_on.nodes = vec!["model.project.orders".into()];
+        let manifest = Manifest {
+            nodes: BTreeMap::from([
+                ("model.project.orders".into(), node("model.project.orders")),
+                ("model.project.summary".into(), summary),
+            ]),
+            exposures: BTreeMap::from([(
+                "exposure.project.dashboard".into(),
+                Exposure {
+                    unique_id: "exposure.project.dashboard".into(),
+                    name: "dashboard".into(),
+                    url: None,
+                    depends_on: DependsOn {
+                        nodes: vec!["model.project.summary".into()],
+                    },
+                },
+            )]),
+            child_map: BTreeMap::from([(
+                "model.project.orders".into(),
+                vec!["model.project.summary".into()],
+            )]),
+        };
+
+        let impact = manifest.impact(&BTreeSet::from(["model.project.orders".into()]));
+        assert!(impact.dbt_lineage.iter().any(|edge| {
+            edge.from == "model.project.orders" && edge.to == "model.project.summary"
+        }));
+        assert!(impact.dbt_lineage.iter().any(|edge| {
+            edge.from == "model.project.summary" && edge.to == "exposure.project.dashboard"
+        }));
+    }
+
+    #[test]
+    fn lineage_changes_compare_current_and_production_edges() {
+        let mut production_summary = node("model.project.summary");
+        production_summary.depends_on.nodes = vec!["model.project.orders".into()];
+        let production = Manifest {
+            nodes: BTreeMap::from([
+                ("model.project.orders".into(), node("model.project.orders")),
+                ("model.project.summary".into(), production_summary),
+            ]),
+            exposures: BTreeMap::new(),
+            child_map: BTreeMap::new(),
+        };
+        let mut current_summary = node("model.project.summary");
+        current_summary.depends_on.nodes = vec!["model.project.refunds".into()];
+        let current = Manifest {
+            nodes: BTreeMap::from([
+                (
+                    "model.project.refunds".into(),
+                    node("model.project.refunds"),
+                ),
+                ("model.project.summary".into(), current_summary),
+            ]),
+            exposures: BTreeMap::new(),
+            child_map: BTreeMap::new(),
+        };
+
+        let changes = current.lineage_changes(&production);
+        assert!(changes.iter().any(|change| {
+            change.change == LineageChangeKind::Added && change.edge.from == "model.project.refunds"
+        }));
+        assert!(changes.iter().any(|change| {
+            change.change == LineageChangeKind::Removed
+                && change.edge.from == "model.project.orders"
+        }));
     }
 
     #[test]

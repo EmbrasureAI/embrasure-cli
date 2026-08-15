@@ -141,6 +141,10 @@ async fn execute_with_dbt(
     for account in &config.accounts {
         let manifest = context.manifest(&account.name)?;
         let production_manifest = context.production_manifest(&account.name)?;
+        report
+            .impact
+            .dbt_lineage_changes
+            .extend(manifest.lineage_changes(production_manifest));
         let removed = production_manifest.removed_models(manifest);
         all_selected.extend(removed.iter().cloned());
         let removal_impact = production_manifest.impact(&removed);
@@ -149,6 +153,7 @@ async fn execute_with_dbt(
             .impact
             .dbt_exposures
             .extend(removal_impact.dbt_exposures);
+        report.impact.dbt_lineage.extend(removal_impact.dbt_lineage);
         for model in &removed {
             let production_node = &production_manifest.nodes[model];
             removed_production_relations.push((
@@ -229,6 +234,7 @@ async fn execute_with_dbt(
         let impact = manifest.impact(selected);
         report.impact.dbt_models.extend(impact.dbt_models);
         report.impact.dbt_exposures.extend(impact.dbt_exposures);
+        report.impact.dbt_lineage.extend(impact.dbt_lineage);
         downstream.extend(manifest.descendants(selected));
         report
             .coverage_gaps

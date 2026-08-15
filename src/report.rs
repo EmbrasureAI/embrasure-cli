@@ -127,6 +127,8 @@ pub struct CoverageGap {
 pub struct ImpactReport {
     pub dbt_models: Vec<ImpactedAsset>,
     pub dbt_exposures: Vec<ImpactedAsset>,
+    pub dbt_lineage: Vec<LineageEdge>,
+    pub dbt_lineage_changes: Vec<LineageChange>,
     pub metabase_dashboards: Vec<ImpactedAsset>,
     pub cross_account_dependencies: Vec<CrossAccountDependency>,
 }
@@ -137,6 +139,27 @@ pub struct ImpactedAsset {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LineageEdge {
+    pub from: String,
+    pub from_name: String,
+    pub to: String,
+    pub to_name: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageChangeKind {
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LineageChange {
+    pub change: LineageChangeKind,
+    pub edge: LineageEdge,
 }
 
 impl Report {
@@ -171,6 +194,10 @@ impl Report {
         self.impact.dbt_models.dedup();
         self.impact.dbt_exposures.sort();
         self.impact.dbt_exposures.dedup();
+        self.impact.dbt_lineage.sort();
+        self.impact.dbt_lineage.dedup();
+        self.impact.dbt_lineage_changes.sort();
+        self.impact.dbt_lineage_changes.dedup();
         self.impact.metabase_dashboards.sort();
         self.impact.metabase_dashboards.dedup();
         for dependency in &mut self.impact.cross_account_dependencies {
@@ -262,11 +289,20 @@ impl Report {
                 );
             }
         }
-        for asset in &self.impact.dbt_models {
-            let _ = writeln!(output, "- [impact:dbt] {}", asset.id);
-        }
-        for asset in &self.impact.dbt_exposures {
-            let _ = writeln!(output, "- [impact:exposure] {}", asset.id);
+        self.write_human_lineage(&mut output);
+        if !self.impact.dbt_lineage_changes.is_empty() {
+            output.push_str("Lineage changes\n");
+            for change in &self.impact.dbt_lineage_changes {
+                let marker = match change.change {
+                    LineageChangeKind::Added => "+",
+                    LineageChangeKind::Removed => "-",
+                };
+                let _ = writeln!(
+                    output,
+                    "  {marker} {} -> {}",
+                    change.edge.from_name, change.edge.to_name
+                );
+            }
         }
         for asset in &self.impact.metabase_dashboards {
             let _ = writeln!(output, "- [impact:metabase] {}", asset.name);
@@ -403,6 +439,20 @@ impl Report {
                 dependency.from, dependency.to
             );
         }
+        if !self.impact.dbt_lineage_changes.is_empty() {
+            output.push_str("\n## Lineage changes\n\n");
+            for change in &self.impact.dbt_lineage_changes {
+                let label = match change.change {
+                    LineageChangeKind::Added => "Added",
+                    LineageChangeKind::Removed => "Removed",
+                };
+                let _ = writeln!(
+                    output,
+                    "- **{label}:** `{}` → `{}`",
+                    change.edge.from_name, change.edge.to_name
+                );
+            }
+        }
         if !self.execution_errors.is_empty() {
             output.push_str("\n## Execution errors\n\n");
             for error in &self.execution_errors {
@@ -410,6 +460,107 @@ impl Report {
             }
         }
         output
+    }
+
+    fn write_human_lineage(&self, output: &mut String) {
+        if self.impact.dbt_models.is_empty() && self.impact.dbt_exposures.is_empty() {
+            return;
+        }
+
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let model_ids = self
+            .impact
+            .dbt_models
+            .iter()
+            .map(|asset| asset.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut names = self
+            .impact
+            .dbt_models
+            .iter()
+            .chain(&self.impact.dbt_exposures)
+            .map(|asset| (asset.id.as_str(), asset.name.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        let mut children = BTreeMap::<&str, Vec<&LineageEdge>>::new();
+        let mut model_children = BTreeSet::new();
+        for edge in &self.impact.dbt_lineage {
+            names.entry(&edge.from).or_insert(&edge.from_name);
+            names.entry(&edge.to).or_insert(&edge.to_name);
+            children.entry(&edge.from).or_default().push(edge);
+            if model_ids.contains(edge.to.as_str()) {
+                model_children.insert(edge.to.as_str());
+            }
+        }
+
+        let mut roots = self
+            .impact
+            .dbt_models
+            .iter()
+            .filter(|asset| !model_children.contains(asset.id.as_str()))
+            .map(|asset| asset.id.as_str())
+            .collect::<Vec<_>>();
+        if roots.is_empty() {
+            roots.extend(model_ids.iter().copied());
+        }
+
+        output.push_str("Lineage impact\n");
+        let mut rendered = BTreeSet::new();
+        for root in roots {
+            write_lineage_node(output, root, "  ", None, &names, &children, &mut rendered);
+        }
+        for asset in &self.impact.dbt_exposures {
+            if rendered.insert(asset.id.as_str()) {
+                let _ = writeln!(output, "  exposure: {}", asset.name);
+            }
+        }
+    }
+}
+
+fn write_lineage_node<'a>(
+    output: &mut String,
+    id: &'a str,
+    prefix: &str,
+    connector: Option<&str>,
+    names: &std::collections::BTreeMap<&'a str, &'a str>,
+    children: &std::collections::BTreeMap<&'a str, Vec<&'a LineageEdge>>,
+    rendered: &mut std::collections::BTreeSet<&'a str>,
+) {
+    let label = names.get(id).copied().unwrap_or(id);
+    let kind = if id.starts_with("exposure.") {
+        "exposure: "
+    } else {
+        ""
+    };
+    let _ = writeln!(
+        output,
+        "{prefix}{}{kind}{label}",
+        connector.unwrap_or_default()
+    );
+    if !rendered.insert(id) {
+        return;
+    }
+    let edges = children.get(id).map(Vec::as_slice).unwrap_or_default();
+    let child_prefix = match connector {
+        Some("├─ ") => format!("{prefix}│  "),
+        Some(_) => format!("{prefix}   "),
+        None => prefix.to_owned(),
+    };
+    for (index, edge) in edges.iter().enumerate() {
+        let child_connector = if index + 1 == edges.len() {
+            "└─ "
+        } else {
+            "├─ "
+        };
+        write_lineage_node(
+            output,
+            &edge.to,
+            &child_prefix,
+            Some(child_connector),
+            names,
+            children,
+            rendered,
+        );
     }
 }
 
@@ -448,5 +599,38 @@ mod tests {
         });
         report.finalize();
         assert_eq!(report.exit_code, EXIT_FINDINGS);
+    }
+
+    #[test]
+    fn human_report_shows_lineage_tree_and_dependency_changes() {
+        let mut report = Report::empty("main".into(), Thresholds::default());
+        report.impact.dbt_models = vec![
+            ImpactedAsset {
+                id: "model.project.orders".into(),
+                name: "orders".into(),
+                url: None,
+            },
+            ImpactedAsset {
+                id: "model.project.order_summary".into(),
+                name: "order_summary".into(),
+                url: None,
+            },
+        ];
+        let edge = LineageEdge {
+            from: "model.project.orders".into(),
+            from_name: "orders".into(),
+            to: "model.project.order_summary".into(),
+            to_name: "order_summary".into(),
+        };
+        report.impact.dbt_lineage.push(edge.clone());
+        report.impact.dbt_lineage_changes.push(LineageChange {
+            change: LineageChangeKind::Added,
+            edge,
+        });
+        report.finalize();
+
+        let output = report.human();
+        assert!(output.contains("Lineage impact\n  orders\n  └─ order_summary"));
+        assert!(output.contains("Lineage changes\n  + orders -> order_summary"));
     }
 }
