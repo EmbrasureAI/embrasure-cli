@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    config::{SafetyConfig, Thresholds},
+    config::{ComparisonMode, SafetyConfig, Thresholds},
     report::{ColumnComparison, ColumnMetrics, Finding, ModelComparison, PrimaryKeyComparison},
     snowflake::{Relation, ResultColumn, SnowflakeClient, quote_identifier},
 };
@@ -13,10 +13,15 @@ pub async fn compare_model(
     model_id: &str,
     ci: &Relation,
     production: &Relation,
-    primary_key: &[String],
-    safety: &SafetyConfig,
-    thresholds: Thresholds,
+    options: CompareOptions<'_>,
 ) -> Result<(ModelComparison, Vec<Finding>)> {
+    let CompareOptions {
+        primary_key,
+        where_clause,
+        mode,
+        safety,
+        thresholds,
+    } = options;
     let ci_columns = relation_columns(client, ci)
         .await
         .with_context(|| format!("could not inspect CI relation {}", ci.sql()))?;
@@ -43,8 +48,16 @@ pub async fn compare_model(
         .cloned()
         .collect::<Vec<_>>();
 
-    let ci_metrics = relation_metrics(client, ci, &common, &ci_map).await?;
-    let prod_metrics = relation_metrics(client, production, &common, &production_map).await?;
+    let ci_metrics = relation_metrics(client, ci, &common, &ci_map, where_clause, mode).await?;
+    let prod_metrics = relation_metrics(
+        client,
+        production,
+        &common,
+        &production_map,
+        where_clause,
+        mode,
+    )
+    .await?;
     let mut findings = vec![];
     let row_change = relative_change(ci_metrics.row_count as f64, prod_metrics.row_count as f64);
     if row_change > thresholds.row_count_relative {
@@ -101,10 +114,16 @@ pub async fn compare_model(
             }
             let cardinality_change =
                 relative_change(ci_value.cardinality as f64, prod_value.cardinality as f64);
-            if cardinality_change > thresholds.cardinality_relative {
+            let cardinality_threshold = effective_cardinality_threshold(mode, thresholds);
+            if cardinality_change > cardinality_threshold {
+                let qualifier = if mode == ComparisonMode::Quick {
+                    "estimated "
+                } else {
+                    ""
+                };
                 findings.push(finding(model_id, "cardinality", format!(
-                    "column {name} cardinality is {} in CI vs {} in production (relative change {:.6}, allowed {:.6})",
-                    ci_value.cardinality, prod_value.cardinality, cardinality_change, thresholds.cardinality_relative,
+                    "column {name} {qualifier}cardinality is {} in CI vs {} in production (relative change {:.6}, allowed {:.6})",
+                    ci_value.cardinality, prod_value.cardinality, cardinality_change, cardinality_threshold,
                 )));
             }
             let numeric = ci_column.is_some_and(|column| is_numeric(&column.data_type))
@@ -178,6 +197,7 @@ pub async fn compare_model(
             production,
             &resolved_primary_key,
             safety.primary_key_sample_limit,
+            where_clause,
         )
         .await?;
         if comparison.ci_only_count > 0 || comparison.production_only_count > 0 {
@@ -212,6 +232,14 @@ pub async fn compare_model(
     ))
 }
 
+pub struct CompareOptions<'a> {
+    pub primary_key: &'a [String],
+    pub where_clause: Option<&'a str>,
+    pub mode: ComparisonMode,
+    pub safety: &'a SafetyConfig,
+    pub thresholds: Thresholds,
+}
+
 async fn relation_columns(
     client: &SnowflakeClient,
     relation: &Relation,
@@ -233,12 +261,17 @@ async fn relation_metrics(
     relation: &Relation,
     names: &[String],
     types: &BTreeMap<String, ResultColumn>,
+    where_clause: Option<&str>,
+    mode: ComparisonMode,
 ) -> Result<RelationMetrics> {
     let mut expressions = vec!["COUNT(*)".to_owned()];
     for name in names {
         let column = quote_identifier(name);
         expressions.push(format!("COUNT_IF({column} IS NULL)"));
-        expressions.push(format!("COUNT(DISTINCT {column})"));
+        expressions.push(match mode {
+            ComparisonMode::Quick => format!("APPROX_COUNT_DISTINCT({column})"),
+            ComparisonMode::Deep => format!("COUNT(DISTINCT {column})"),
+        });
         if types
             .get(name)
             .is_some_and(|value| is_orderable(&value.data_type))
@@ -253,19 +286,22 @@ async fn relation_metrics(
             .get(name)
             .is_some_and(|value| is_numeric(&value.data_type))
         {
-            expressions.extend([
-                format!("AVG({column})::DOUBLE"),
-                format!("APPROX_PERCENTILE({column}, 0.05)::DOUBLE"),
-                format!("APPROX_PERCENTILE({column}, 0.50)::DOUBLE"),
-                format!("APPROX_PERCENTILE({column}, 0.95)::DOUBLE"),
-            ]);
+            expressions.push(format!("AVG({column})::DOUBLE"));
+            if mode == ComparisonMode::Deep {
+                expressions.extend([
+                    format!("APPROX_PERCENTILE({column}, 0.05)::DOUBLE"),
+                    format!("APPROX_PERCENTILE({column}, 0.50)::DOUBLE"),
+                    format!("APPROX_PERCENTILE({column}, 0.95)::DOUBLE"),
+                ]);
+            }
         }
     }
+    let source = filtered_relation(relation, where_clause);
     let result = client
         .execute(&format!(
             "SELECT {} FROM {}",
             expressions.join(", "),
-            relation.sql()
+            source
         ))
         .await?;
     let row = result
@@ -298,10 +334,13 @@ async fn relation_metrics(
             .is_some_and(|value| is_numeric(&value.data_type))
         {
             metrics.average = parse_optional_f64(row.get(index).and_then(Option::as_deref))?;
-            metrics.p05 = parse_optional_f64(row.get(index + 1).and_then(Option::as_deref))?;
-            metrics.p50 = parse_optional_f64(row.get(index + 2).and_then(Option::as_deref))?;
-            metrics.p95 = parse_optional_f64(row.get(index + 3).and_then(Option::as_deref))?;
-            index += 4;
+            index += 1;
+            if mode == ComparisonMode::Deep {
+                metrics.p05 = parse_optional_f64(row.get(index).and_then(Option::as_deref))?;
+                metrics.p50 = parse_optional_f64(row.get(index + 1).and_then(Option::as_deref))?;
+                metrics.p95 = parse_optional_f64(row.get(index + 2).and_then(Option::as_deref))?;
+                index += 3;
+            }
         }
         columns.insert(name.clone(), metrics);
     }
@@ -314,21 +353,20 @@ async fn compare_primary_key(
     production: &Relation,
     keys: &[String],
     sample_limit: usize,
+    where_clause: Option<&str>,
 ) -> Result<PrimaryKeyComparison> {
     let selected = keys
         .iter()
         .map(|key| quote_identifier(key))
         .collect::<Vec<_>>()
         .join(", ");
+    let ci_source = filtered_relation(ci, where_clause);
+    let production_source = filtered_relation(production, where_clause);
     let ci_only = format!(
-        "SELECT {selected} FROM {} MINUS SELECT {selected} FROM {}",
-        ci.sql(),
-        production.sql()
+        "SELECT {selected} FROM {ci_source} MINUS SELECT {selected} FROM {production_source}"
     );
     let production_only = format!(
-        "SELECT {selected} FROM {} MINUS SELECT {selected} FROM {}",
-        production.sql(),
-        ci.sql()
+        "SELECT {selected} FROM {production_source} MINUS SELECT {selected} FROM {ci_source}"
     );
     let counts = client
         .execute(&format!(
@@ -368,6 +406,13 @@ async fn compare_primary_key(
         ci_only_examples: ci_examples,
         production_only_examples: production_examples,
     })
+}
+
+fn filtered_relation(relation: &Relation, where_clause: Option<&str>) -> String {
+    match where_clause {
+        Some(predicate) => format!("{} WHERE ({predicate})", relation.sql()),
+        None => relation.sql(),
+    }
 }
 
 fn column_map(columns: &[ResultColumn]) -> BTreeMap<String, ResultColumn> {
@@ -436,6 +481,14 @@ fn relative_change(current: f64, production: f64) -> f64 {
     }
 }
 
+fn effective_cardinality_threshold(mode: ComparisonMode, thresholds: Thresholds) -> f64 {
+    match mode {
+        // Snowflake's HLL estimate is fast but should not be treated as sub-percent precision.
+        ComparisonMode::Quick => thresholds.cardinality_relative.max(0.02),
+        ComparisonMode::Deep => thresholds.cardinality_relative,
+    }
+}
+
 fn parse_u64(value: Option<&str>) -> Result<u64> {
     value
         .context("Snowflake returned NULL for an integer metric")?
@@ -480,5 +533,31 @@ mod tests {
     fn non_finite_metrics_cannot_break_json_output() {
         assert!(parse_optional_f64(Some("NaN")).is_err());
         assert!(parse_optional_f64(Some("inf")).is_err());
+    }
+
+    #[test]
+    fn filters_are_applied_inside_each_relation() {
+        let relation = Relation {
+            database: "D".into(),
+            schema: "S".into(),
+            identifier: "ORDERS".into(),
+        };
+        assert_eq!(
+            filtered_relation(&relation, Some("ORDER_DATE >= CURRENT_DATE - 30")),
+            r#""D"."S"."ORDERS" WHERE (ORDER_DATE >= CURRENT_DATE - 30)"#
+        );
+    }
+
+    #[test]
+    fn quick_cardinality_has_an_estimation_margin() {
+        let thresholds = Thresholds::default();
+        assert_eq!(
+            effective_cardinality_threshold(ComparisonMode::Quick, thresholds),
+            0.02
+        );
+        assert_eq!(
+            effective_cardinality_threshold(ComparisonMode::Deep, thresholds),
+            thresholds.cardinality_relative
+        );
     }
 }

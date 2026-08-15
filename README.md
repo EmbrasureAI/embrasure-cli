@@ -55,6 +55,8 @@ embrasure check --base origin/main --json
 embrasure check --base origin/main --json --markdown embrasure-check.md
 ```
 
+For a faster first pass on large tables, add `--mode quick`. Deep mode remains the default and includes exact cardinality plus numeric percentiles.
+
 The intended agent loop is simple:
 
 ```text
@@ -74,7 +76,7 @@ Do not request review until it exits 0.
 
 ## Advanced setup
 
-The guided setup creates the smallest configuration needed for one Snowflake account. For service credentials, multiple accounts, primary keys, custom thresholds, non-dbt changes, cross-account dependencies, or Metabase, use the [example configuration](embrasure-check.example.yml) and [enterprise setup guide](docs/enterprise.md).
+The guided setup creates the smallest configuration needed for one Snowflake account. For service credentials, multiple accounts, primary keys, large-table filters, concurrency and time limits, custom thresholds, non-dbt changes, cross-account dependencies, or Metabase, use the [example configuration](embrasure-check.example.yml) and [enterprise setup guide](docs/enterprise.md).
 
 ## Safety
 

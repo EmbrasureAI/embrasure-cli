@@ -26,6 +26,7 @@ use crate::{
     config::AccountConfig,
 };
 
+#[derive(Clone)]
 pub struct SnowflakeClient {
     http: Client,
     endpoint: String,

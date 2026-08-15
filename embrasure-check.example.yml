@@ -14,6 +14,12 @@ safety:
   max_columns_per_model: 100
   primary_key_sample_limit: 20
 
+comparison:
+  # quick estimates cardinality and skips percentiles; deep runs every metric.
+  mode: deep
+  concurrency: 4
+  timeout_seconds: 900
+
 thresholds:
   row_count_relative: 0.001
   null_rate_absolute: 0.001
@@ -51,6 +57,8 @@ models:
   # Keys may be dbt unique IDs or model names.
   model.orders:
     primary_key: [order_id]
+    # Optional: limit both CI and production scans for a large fact table.
+    # where: "order_date >= DATEADD(day, -30, CURRENT_DATE)"
     # Set this only for an intentional deletion after checking reported impact.
     # allow_removal: true
 

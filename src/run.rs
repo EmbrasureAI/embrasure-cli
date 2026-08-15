@@ -1,19 +1,24 @@
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::BTreeSet, path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use tokio::{task::JoinSet, time::timeout};
 use uuid::Uuid;
 
 use crate::{
     auth,
-    compare::compare_model,
-    config::{Config, ModelConfig},
+    compare::{CompareOptions, compare_model},
+    config::{ComparisonMode, Config, ModelConfig, SafetyConfig, Thresholds},
     dbt::{self, DbtContext, ManifestNode},
     metabase,
     report::{CiSchema, CoverageGap, Finding, ModelReport, Report},
     snowflake::{Relation, SnowflakeClient, is_managed_schema},
 };
 
-pub async fn run_check(config_path: &Path, base: &str) -> Report {
+pub async fn run_check(
+    config_path: &Path,
+    base: &str,
+    mode_override: Option<ComparisonMode>,
+) -> Report {
     if base.trim().is_empty() || base.starts_with('-') {
         return error_report(
             base,
@@ -24,6 +29,9 @@ pub async fn run_check(config_path: &Path, base: &str) -> Report {
         Ok(config) => config,
         Err(error) => return error_report(base, error),
     };
+    if let Some(mode) = mode_override {
+        config.comparison.mode = mode;
+    }
     if let Err(error) = config.resolve_from(config_path) {
         return error_report(base, error);
     }
@@ -242,6 +250,7 @@ async fn execute_with_dbt(
         }
     }
     let mut production_relations = removed_production_relations;
+    let mut comparison_jobs = Vec::new();
     for (index, (account, selected)) in config.accounts.iter().zip(&selected_by_account).enumerate()
     {
         let manifest = context.manifest(&account.name)?;
@@ -311,21 +320,44 @@ async fn execute_with_dbt(
             let production_relation =
                 relation_for(production_node, &account.database, &production_node.schema);
             let model_config = model_config(config, id, &node.name);
-            let (comparison, findings) = compare_model(
-                &clients[index],
-                id,
-                &ci_relation,
-                &production_relation,
-                &model_config.primary_key,
-                &config.safety,
-                config.thresholds,
-            )
-            .await
-            .with_context(|| format!("comparison failed for {id} in account {}", account.name))?;
-            if let Some(model) = find_model_mut(report, id, &account.name) {
-                model.comparison = Some(comparison);
+            comparison_jobs.push(ComparisonJob {
+                client: clients[index].clone(),
+                model_id: id.clone(),
+                account: account.name.clone(),
+                ci: ci_relation,
+                production: production_relation,
+                primary_key: model_config.primary_key.clone(),
+                where_clause: model_config.where_clause.clone(),
+            });
+        }
+    }
+
+    let completed = timeout(
+        Duration::from_secs(config.comparison.timeout_seconds),
+        run_comparisons(
+            comparison_jobs,
+            config.comparison.concurrency,
+            config.comparison.mode,
+            config.safety.clone(),
+            config.thresholds,
+        ),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Snowflake comparisons exceeded comparison.timeout_seconds ({})",
+            config.comparison.timeout_seconds
+        )
+    })??;
+    for item in completed {
+        match item.result {
+            Ok((comparison, findings)) => {
+                if let Some(model) = find_model_mut(report, &item.model_id, &item.account) {
+                    model.comparison = Some(comparison);
+                }
+                report.findings.extend(findings);
             }
-            report.findings.extend(findings);
+            Err(error) => report.execution_errors.push(format_error(&error)),
         }
     }
 
@@ -343,6 +375,82 @@ async fn execute_with_dbt(
         }
     }
     Ok(())
+}
+
+struct ComparisonJob {
+    client: SnowflakeClient,
+    model_id: String,
+    account: String,
+    ci: Relation,
+    production: Relation,
+    primary_key: Vec<String>,
+    where_clause: Option<String>,
+}
+
+struct CompletedComparison {
+    model_id: String,
+    account: String,
+    result: Result<(crate::report::ModelComparison, Vec<Finding>)>,
+}
+
+async fn run_comparisons(
+    jobs: Vec<ComparisonJob>,
+    concurrency: usize,
+    mode: ComparisonMode,
+    safety: SafetyConfig,
+    thresholds: Thresholds,
+) -> Result<Vec<CompletedComparison>> {
+    let mut pending = jobs.into_iter();
+    let mut running = JoinSet::new();
+    let mut completed = Vec::new();
+
+    for _ in 0..concurrency {
+        let Some(job) = pending.next() else { break };
+        spawn_comparison(&mut running, job, mode, safety.clone(), thresholds);
+    }
+    while let Some(result) = running.join_next().await {
+        completed.push(result.context("comparison worker stopped unexpectedly")?);
+        if let Some(job) = pending.next() {
+            spawn_comparison(&mut running, job, mode, safety.clone(), thresholds);
+        }
+    }
+    Ok(completed)
+}
+
+fn spawn_comparison(
+    running: &mut JoinSet<CompletedComparison>,
+    job: ComparisonJob,
+    mode: ComparisonMode,
+    safety: SafetyConfig,
+    thresholds: Thresholds,
+) {
+    running.spawn(async move {
+        let result = compare_model(
+            &job.client,
+            &job.model_id,
+            &job.ci,
+            &job.production,
+            CompareOptions {
+                primary_key: &job.primary_key,
+                where_clause: job.where_clause.as_deref(),
+                mode,
+                safety: &safety,
+                thresholds,
+            },
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "comparison failed for {} in account {}",
+                job.model_id, job.account
+            )
+        });
+        CompletedComparison {
+            model_id: job.model_id,
+            account: job.account,
+            result,
+        }
+    });
 }
 
 async fn cleanup_schemas(
@@ -422,6 +530,7 @@ fn model_config<'a>(config: &'a Config, id: &str, name: &str) -> &'a ModelConfig
 static EMPTY_MODEL_CONFIG: ModelConfig = ModelConfig {
     primary_key: vec![],
     allow_removal: false,
+    where_clause: None,
 };
 
 fn find_model_mut<'a>(
@@ -469,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_revisions_cannot_be_parsed_as_options() {
-        let report = run_check(Path::new("unused.yml"), "--help").await;
+        let report = run_check(Path::new("unused.yml"), "--help", None).await;
         assert_eq!(report.status, crate::report::Status::ExecutionFailure);
         assert!(report.execution_errors[0].contains("must not start"));
     }

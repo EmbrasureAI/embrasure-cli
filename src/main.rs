@@ -11,7 +11,24 @@ mod snowflake;
 
 use std::{path::PathBuf, process::ExitCode};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+use crate::config::ComparisonMode;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ModeArg {
+    Quick,
+    Deep,
+}
+
+impl From<ModeArg> for ComparisonMode {
+    fn from(value: ModeArg) -> Self {
+        match value {
+            ModeArg::Quick => Self::Quick,
+            ModeArg::Deep => Self::Deep,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -64,6 +81,9 @@ enum Command {
         /// Also write a deterministic Markdown report.
         #[arg(long, value_name = "PATH")]
         markdown: Option<PathBuf>,
+        /// Validation depth. Quick skips percentiles and estimates cardinality.
+        #[arg(long, value_enum)]
+        mode: Option<ModeArg>,
     },
     /// Check local tools, credentials, Snowflake permissions, and optional Metabase access.
     Doctor {
@@ -149,9 +169,10 @@ async fn main() -> ExitCode {
             config,
             json,
             markdown,
+            mode,
         } => {
             eprintln!("embrasure: validating changes against {base}");
-            let mut report = run::run_check(&config, &base).await;
+            let mut report = run::run_check(&config, &base, mode.map(Into::into)).await;
             if let Some(path) = markdown
                 && let Err(error) = report.write_markdown(&path)
             {

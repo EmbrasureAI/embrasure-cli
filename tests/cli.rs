@@ -147,3 +147,15 @@ fn run_remains_an_alias_for_check() {
             "Build and compare changed dbt models",
         ));
 }
+
+#[test]
+fn check_exposes_quick_and_deep_modes() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--mode <MODE>"))
+        .stdout(predicate::str::contains("quick"))
+        .stdout(predicate::str::contains("deep"));
+}

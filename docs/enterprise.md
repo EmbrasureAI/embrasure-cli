@@ -8,6 +8,34 @@ The clean enterprise split is:
 
 Each Snowflake account gets its own `accounts` entry, dbt selector, user, role, warehouse, and credential. Run `embrasure doctor` after setup; it verifies each one independently.
 
+## Large projects
+
+Embrasure only builds changed dbt models and their downstream dependents. Independent Snowflake comparisons run concurrently, bounded by `comparison.concurrency`.
+
+Use quick mode for an inexpensive first pass:
+
+```sh
+embrasure check --base origin/main --mode quick
+```
+
+Quick mode estimates cardinality, ignores estimated cardinality changes below 2%, and skips numeric percentiles. Deep mode is the default and runs exact cardinality plus percentiles. Both modes still check schema, row counts, null rates, ranges, averages, dbt tests, downstream impact, and configured primary keys.
+
+Set a total comparison budget and limit scans on large fact tables:
+
+```yaml
+comparison:
+  mode: deep
+  concurrency: 4
+  timeout_seconds: 900
+
+models:
+  model.analytics.orders:
+    primary_key: [order_id]
+    where: "order_date >= DATEADD(day, -30, CURRENT_DATE)"
+```
+
+The predicate is applied to both the CI and production relation. Use a stable boundary so the two sides cover the same data. Snowflake also enforces `safety.statement_timeout_seconds` on each statement.
+
 ## 1. Grant a narrow validation role
 
 Run equivalent grants in every Snowflake account. Replace the example object names with yours.
