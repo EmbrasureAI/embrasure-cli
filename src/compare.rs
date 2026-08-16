@@ -91,17 +91,20 @@ pub async fn compare_model(
                 "column_added",
                 format!("column {name} exists in CI but not production"),
             ));
-        } else if let (Some(ci_column), Some(prod_column)) = (ci_column, prod_column)
-            && !equivalent_type(&ci_column.data_type, &prod_column.data_type)
-        {
-            findings.push(finding(
-                model_id,
-                "column_type",
-                format!(
-                    "column {name} changed from {} to {}",
-                    prod_column.data_type, ci_column.data_type,
-                ),
-            ));
+        } else if let (Some(ci_column), Some(prod_column)) = (ci_column, prod_column) {
+            if !ci_column
+                .data_type
+                .eq_ignore_ascii_case(&prod_column.data_type)
+            {
+                findings.push(finding(
+                    model_id,
+                    "column_type",
+                    format!(
+                        "column {name} changed from {} to {}",
+                        prod_column.data_type, ci_column.data_type,
+                    ),
+                ));
+            }
         }
         let ci_value = ci_metrics.columns.get(&name).cloned();
         let prod_value = prod_metrics.columns.get(&name).cloned();
@@ -135,13 +138,15 @@ pub async fn compare_model(
                 ("p50", ci_value.p50, prod_value.p50),
                 ("p95", ci_value.p95, prod_value.p95),
             ] {
-                if numeric && let (Some(ci_number), Some(prod_number)) = (ci_number, prod_number) {
-                    let change = relative_change(ci_number, prod_number);
-                    if change > thresholds.numeric_relative {
-                        findings.push(finding(model_id, "distribution", format!(
-                            "column {name} {metric} is {ci_number:.6} in CI vs {prod_number:.6} in production (relative change {change:.6}, allowed {:.6})",
-                            thresholds.numeric_relative,
-                        )));
+                if numeric {
+                    if let (Some(ci_number), Some(prod_number)) = (ci_number, prod_number) {
+                        let change = relative_change(ci_number, prod_number);
+                        if change > thresholds.numeric_relative {
+                            findings.push(finding(model_id, "distribution", format!(
+                                "column {name} {metric} is {ci_number:.6} in CI vs {prod_number:.6} in production (relative change {change:.6}, allowed {:.6})",
+                                thresholds.numeric_relative,
+                            )));
+                        }
                     }
                 }
             }
@@ -162,12 +167,12 @@ pub async fn compare_model(
                             )));
                         }
                     }
-                } else if let (Some(ci_extreme), Some(prod_extreme)) = (ci_extreme, prod_extreme)
-                    && ci_extreme != prod_extreme
-                {
-                    findings.push(finding(model_id, "range", format!(
-                        "column {name} {metric} is {ci_extreme:?} in CI vs {prod_extreme:?} in production"
-                    )));
+                } else if let (Some(ci_extreme), Some(prod_extreme)) = (ci_extreme, prod_extreme) {
+                    if ci_extreme != prod_extreme {
+                        findings.push(finding(model_id, "range", format!(
+                            "column {name} {metric} is {ci_extreme:?} in CI vs {prod_extreme:?} in production"
+                        )));
+                    }
                 }
             }
         }
@@ -572,10 +577,6 @@ fn is_orderable(data_type: &str) -> bool {
             .unwrap_or_default(),
         "ARRAY" | "OBJECT" | "VARIANT" | "BINARY" | "GEOGRAPHY" | "GEOMETRY"
     )
-}
-
-fn equivalent_type(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
 }
 
 fn relative_change(current: f64, production: f64) -> f64 {

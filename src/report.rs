@@ -1,16 +1,27 @@
 use std::{fmt::Write as _, fs, path::Path};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::config::{CrossAccountDependency, DownstreamPolicy, Thresholds};
+use crate::{
+    config::{CrossAccountDependency, DownstreamPolicy, Thresholds},
+    style::Style,
+};
 
 pub const EXIT_PASS: u8 = 0;
 pub const EXIT_FINDINGS: u8 = 1;
 pub const EXIT_INCOMPLETE: u8 = 2;
 pub const EXIT_EXECUTION: u8 = 3;
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ReportVersion {
+    #[value(name = "1")]
+    V1,
+    #[value(name = "2")]
+    V2,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Pass,
@@ -19,7 +30,7 @@ pub enum Status {
     ExecutionFailure,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Report {
     pub schema_version: u8,
     pub status: Status,
@@ -37,7 +48,7 @@ pub struct Report {
     pub execution_errors: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CiSchema {
     pub account: String,
     pub database: String,
@@ -45,7 +56,7 @@ pub struct CiSchema {
     pub cleaned_up: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Summary {
     pub models_selected: usize,
     pub models_built: usize,
@@ -54,7 +65,7 @@ pub struct Summary {
     pub coverage_gaps: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelReport {
     pub unique_id: String,
     pub name: String,
@@ -66,7 +77,7 @@ pub struct ModelReport {
     pub comparison: Option<ModelComparison>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelComparison {
     pub ci_row_count: u64,
     pub production_row_count: u64,
@@ -75,7 +86,7 @@ pub struct ModelComparison {
     pub primary_key: Option<PrimaryKeyComparison>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ColumnComparison {
     pub name: String,
     pub ci_type: Option<String>,
@@ -84,7 +95,7 @@ pub struct ColumnComparison {
     pub production: Option<ColumnMetrics>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ColumnMetrics {
     pub null_count: u64,
     pub null_rate: f64,
@@ -103,7 +114,7 @@ pub struct ColumnMetrics {
     pub p95: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PrimaryKeyComparison {
     pub columns: Vec<String>,
     pub ci_only_count: u64,
@@ -119,28 +130,28 @@ pub struct PrimaryKeyComparison {
     pub ci_duplicate_examples: Vec<Vec<Option<String>>>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Finding {
     pub model: String,
     pub check: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CoverageGap {
     pub scope: String,
     pub check: String,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Notice {
     pub scope: String,
     pub code: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ValidationScope {
     pub downstream: DownstreamPolicy,
     pub impacted_models: usize,
@@ -149,13 +160,13 @@ pub struct ValidationScope {
     pub skipped_models: Vec<SkippedModel>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SkippedModel {
     pub id: String,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ImpactReport {
     pub dbt_models: Vec<ImpactedAsset>,
     pub dbt_exposures: Vec<ImpactedAsset>,
@@ -165,7 +176,7 @@ pub struct ImpactReport {
     pub cross_account_dependencies: Vec<CrossAccountDependency>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ImpactedAsset {
     pub id: String,
     pub name: String,
@@ -173,7 +184,7 @@ pub struct ImpactedAsset {
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LineageEdge {
     pub from: String,
     pub from_name: String,
@@ -181,14 +192,14 @@ pub struct LineageEdge {
     pub to_name: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum LineageChangeKind {
     Added,
     Removed,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LineageChange {
     pub change: LineageChangeKind,
     pub edge: LineageEdge,
@@ -285,12 +296,17 @@ impl Report {
             .with_context(|| format!("could not write Markdown report {}", path.display()))
     }
 
+    #[cfg(test)]
     pub fn human(&self, verbose: bool) -> String {
+        self.human_styled(verbose, &Style::plain())
+    }
+
+    pub fn human_styled(&self, verbose: bool, style: &Style) -> String {
         let label = match self.status {
-            Status::Pass => "PASS",
-            Status::Findings => "FINDINGS",
-            Status::Incomplete => "INCOMPLETE",
-            Status::ExecutionFailure => "EXECUTION FAILURE",
+            Status::Pass => style.good("PASS"),
+            Status::Findings => style.bad("FINDINGS"),
+            Status::Incomplete => style.warn("INCOMPLETE"),
+            Status::ExecutionFailure => style.bad("EXECUTION FAILURE"),
         };
         let mut output = format!(
             "embrasure: {label}\n{} selected · {} built · {} compared · {} findings · {} coverage gaps\n{} impacted · {} validated · {} not validated\n",
@@ -338,16 +354,18 @@ impl Report {
                 );
             }
         }
-        for model in self.models.iter().filter(|_| verbose) {
-            if let Some(comparison) = &model.comparison {
-                let _ = writeln!(
-                    output,
-                    "- [evidence] {}: {} CI rows vs {} production rows across {} columns",
-                    model.unique_id,
-                    comparison.ci_row_count,
-                    comparison.production_row_count,
-                    comparison.columns.len(),
-                );
+        if verbose {
+            for model in &self.models {
+                if let Some(comparison) = &model.comparison {
+                    let _ = writeln!(
+                        output,
+                        "- [evidence] {}: {} CI rows vs {} production rows across {} columns",
+                        model.unique_id,
+                        comparison.ci_row_count,
+                        comparison.production_row_count,
+                        comparison.columns.len(),
+                    );
+                }
             }
         }
         self.write_human_lineage(&mut output, verbose);
@@ -378,11 +396,15 @@ impl Report {
         output
     }
 
-    pub fn json(&self, version: u8) -> serde_json::Result<String> {
+    pub fn json_value(&self, version: ReportVersion) -> serde_json::Result<serde_json::Value> {
         match version {
-            1 => serde_json::to_string_pretty(&ReportV1::from(self)),
-            _ => serde_json::to_string_pretty(self),
+            ReportVersion::V1 => serde_json::to_value(ReportV1::from(self)),
+            ReportVersion::V2 => serde_json::to_value(self),
         }
+    }
+
+    pub fn json(&self, version: ReportVersion) -> serde_json::Result<String> {
+        serde_json::to_string_pretty(&self.json_value(version)?)
     }
 
     pub fn markdown(&self) -> String {
@@ -920,13 +942,13 @@ mod tests {
         report
     }
 
-    fn assert_matches_schema(report: &Report, version: u8, schema: &str) {
+    fn assert_matches_schema(report: &Report, version: ReportVersion, schema: &str) {
         let schema: serde_json::Value = serde_json::from_str(schema).unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();
         let instance: serde_json::Value =
             serde_json::from_str(&report.json(version).unwrap()).unwrap();
         if let Err(error) = validator.validate(&instance) {
-            panic!("report v{version} violates its schema: {error}");
+            panic!("report violates its schema: {error}");
         }
     }
 
@@ -985,10 +1007,19 @@ mod tests {
     #[test]
     fn reports_match_their_published_json_schemas() {
         let report = representative_report();
-        assert_matches_schema(&report, 1, include_str!("../schemas/report-v1.schema.json"));
-        assert_matches_schema(&report, 2, include_str!("../schemas/report-v2.schema.json"));
+        assert_matches_schema(
+            &report,
+            ReportVersion::V1,
+            include_str!("../schemas/report-v1.schema.json"),
+        );
+        assert_matches_schema(
+            &report,
+            ReportVersion::V2,
+            include_str!("../schemas/report-v2.schema.json"),
+        );
 
-        let v1: serde_json::Value = serde_json::from_str(&report.json(1).unwrap()).unwrap();
+        let v1: serde_json::Value =
+            serde_json::from_str(&report.json(ReportVersion::V1).unwrap()).unwrap();
         assert!(v1.get("validation_scope").is_none());
         assert!(v1["models"][0].get("build_strategy").is_none());
         assert!(

@@ -7,19 +7,15 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::{Rng, distributions::Alphanumeric};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    time::timeout,
-};
+use tokio::net::TcpListener;
 use url::Url;
 
-use crate::config::{AccountConfig, AuthConfig, Config};
+use crate::{
+    config::{AccountConfig, AuthConfig, Config},
+    loopback, update,
+};
 
 const LOCAL_CLIENT_ID: &str = "LOCAL_APPLICATION";
 
@@ -227,9 +223,8 @@ async fn login(account: &AccountConfig) -> Result<String> {
     // Keep the path at `/` for compatibility with accounts whose integration
     // was provisioned before optional callback paths rolled out.
     let redirect_uri = format!("http://127.0.0.1:{port}");
-    let verifier = random_string(64);
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let state = random_string(32);
+    let (verifier, challenge) = loopback::pkce_pair();
+    let state = loopback::random_string(32);
     let scope = format!("refresh_token session:role:{}", account.role);
     let mut authorize = Url::parse(&format!(
         "https://{}/oauth/authorize",
@@ -249,12 +244,13 @@ async fn login(account: &AccountConfig) -> Result<String> {
     if webbrowser::open(authorize.as_str()).is_err() {
         eprintln!("Open this URL to sign in:\n{authorize}");
     }
-    let (mut stream, _) = timeout(Duration::from_secs(300), listener.accept())
-        .await
-        .context("Snowflake browser login timed out after 5 minutes")??;
-    let request = timeout(Duration::from_secs(10), read_http_request(&mut stream))
-        .await
-        .context("Snowflake OAuth callback did not finish sending its request")??;
+    let (mut stream, request) = loopback::accept(
+        &listener,
+        Duration::from_secs(300),
+        "Snowflake browser login timed out after 5 minutes",
+        "Snowflake OAuth callback did not finish sending its request",
+    )
+    .await?;
     let request = String::from_utf8_lossy(&request);
     let target = request
         .lines()
@@ -285,12 +281,7 @@ async fn login(account: &AccountConfig) -> Result<String> {
             "Snowflake sign-in failed. Return to the terminal for details.",
         )
     };
-    let body = format!("<html><body><h1>{message}</h1></body></html>");
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(response.as_bytes()).await?;
+    loopback::respond(&mut stream, status, message, "").await?;
     let code = outcome?;
     let token = token_request(
         account,
@@ -305,29 +296,6 @@ async fn login(account: &AccountConfig) -> Result<String> {
     .await?;
     save_cached(account, &token)?;
     Ok(token.access_token)
-}
-
-async fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
-    const MAX_REQUEST_BYTES: usize = 16 * 1024;
-    let mut request = Vec::new();
-    let mut buffer = [0_u8; 1024];
-    loop {
-        let length = stream.read(&mut buffer).await?;
-        if length == 0 {
-            break;
-        }
-        request.extend_from_slice(&buffer[..length]);
-        if request.len() > MAX_REQUEST_BYTES {
-            bail!("Snowflake OAuth callback exceeded {MAX_REQUEST_BYTES} bytes");
-        }
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-    }
-    if request.is_empty() {
-        bail!("Snowflake OAuth callback closed without a request");
-    }
-    Ok(request)
 }
 
 async fn load_or_refresh_local_token(account: &AccountConfig) -> Result<String> {
@@ -357,9 +325,7 @@ async fn load_or_refresh_local_token(account: &AccountConfig) -> Result<String> 
 }
 
 async fn token_request(account: &AccountConfig, form: &[(&str, &str)]) -> Result<TokenResponse> {
-    let response = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?
+    let response = update::http_client()?
         .post(format!(
             "https://{}/oauth/token-request",
             account_host(&account.account)
@@ -481,14 +447,6 @@ pub fn account_host(account: &str) -> String {
     )
 }
 
-fn random_string(length: usize) -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(length)
-        .map(char::from)
-        .collect()
-}
-
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
@@ -511,8 +469,7 @@ mod tests {
 
     #[test]
     fn pkce_values_are_url_safe_and_long_enough() {
-        let verifier = random_string(64);
-        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let (verifier, challenge) = loopback::pkce_pair();
         assert_eq!(verifier.len(), 64);
         assert!(challenge.len() >= 43);
         assert!(!challenge.contains('='));

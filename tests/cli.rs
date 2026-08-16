@@ -12,7 +12,8 @@ fn help_exposes_enterprise_setup_commands() {
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("check"))
         .stdout(predicate::str::contains("doctor"))
-        .stdout(predicate::str::contains("auth"));
+        .stdout(predicate::str::contains("auth"))
+        .stdout(predicate::str::contains("cloud"));
 }
 
 #[test]
@@ -52,6 +53,14 @@ fn init_creates_a_minimal_valid_config() {
     assert!(config.contains("account: my_org-my_account"));
     assert!(config.contains("type: oauth_local"));
     assert!(!config.contains("thresholds:"));
+
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["auth", "status", "--json"])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains(r#""account": "primary""#));
 }
 
 #[test]
@@ -187,4 +196,94 @@ fn legacy_report_version_requires_json_output() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("--json"));
+}
+
+#[test]
+fn check_exposes_explicit_cloud_handoff_controls() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--cloud"))
+        .stdout(predicate::str::contains("--context <BUSINESS_INTENT>"))
+        .stdout(predicate::str::contains("--context-file <PATH>"));
+}
+
+#[test]
+fn cloud_context_cannot_accidentally_enable_network_handoff() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--context", "one row per order"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--cloud"));
+}
+
+#[test]
+fn cloud_subcommands_are_discoverable() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["cloud", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("login"))
+        .stdout(predicate::str::contains("whoami"))
+        .stdout(predicate::str::contains("logout"))
+        .stdout(predicate::str::contains("status"));
+}
+
+#[test]
+fn global_config_works_before_and_after_subcommands() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["--config", "missing-a.yml", "doctor", "--json"])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("missing-a.yml"));
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["doctor", "--config", "missing-b.yml", "--json"])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("missing-b.yml"));
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["cloud", "status", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--config"));
+}
+
+#[test]
+fn completions_support_only_documented_shells() {
+    for shell in ["bash", "zsh", "fish"] {
+        Command::cargo_bin("embrasure")
+            .unwrap()
+            .args(["completion", shell])
+            .assert()
+            .success()
+            .stdout(predicate::str::is_empty().not());
+    }
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["completion", "powershell"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn dry_run_conflicts_with_cloud_and_json_is_ansi_free() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--dry-run", "--cloud"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--json", "--config", "missing.yml"])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("\x1b").not());
 }

@@ -1,7 +1,5 @@
 # Security
 
-Please do not open a public issue for a vulnerability or possible credential exposure. Report it through GitHub's private vulnerability reporting for this repository.
+Report vulnerabilities or possible credential exposure through GitHub's private vulnerability reporting. Do not open a public issue.
 
-Embrasure reads production data. Use a dedicated least-privilege Snowflake role and warehouse. The role should be able to read only the production relations under test and create/drop schemas only in the configured CI database.
-
-See [Security and data flow](docs/security-and-data-flow.md) for runtime connections, local storage, data handling, cleanup guarantees, and release verification.
+See [Security and data flow](docs/security-and-data-flow.md) for permissions, network connections, local storage, data handling, cleanup, updates, and release verification.

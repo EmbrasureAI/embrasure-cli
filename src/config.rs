@@ -442,16 +442,17 @@ impl Config {
             }
         }
         for (model, config) in &self.models {
-            if let Some(predicate) = &config.where_clause
-                && (predicate.trim().is_empty()
+            if let Some(predicate) = &config.where_clause {
+                if predicate.trim().is_empty()
                     || predicate.contains(';')
                     || predicate.contains("--")
                     || predicate.contains("/*")
-                    || predicate.contains("*/"))
-            {
-                bail!(
-                    "models.{model}.where must be one non-empty SQL predicate without comments or semicolons"
-                );
+                    || predicate.contains("*/")
+                {
+                    bail!(
+                        "models.{model}.where must be one non-empty SQL predicate without comments or semicolons"
+                    );
+                }
             }
             let effective = config.thresholds.apply(self.thresholds);
             if !valid_rate(effective.row_count_relative)

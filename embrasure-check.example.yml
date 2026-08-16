@@ -3,6 +3,8 @@ version: 1
 dbt:
   project_dir: .
   profile: analytics
+  # Optional executable or wrapper. The default is dbt.
+  # command: dbt
   # Optional. Without this, a production manifest is generated from --base.
   # state_dir: target/production-artifacts
   threads: 4
@@ -15,7 +17,7 @@ safety:
   primary_key_sample_limit: 20
 
 comparison:
-  # quick estimates cardinality and skips percentiles; deep runs every metric.
+  # quick estimates cardinality and skips percentiles.
   mode: deep
   concurrency: 4
   timeout_seconds: 900

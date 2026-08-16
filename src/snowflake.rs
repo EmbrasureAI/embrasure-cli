@@ -128,7 +128,7 @@ impl SnowflakeClient {
                 .send()
                 .await
                 .context("Snowflake SQL API request failed")?;
-            self.consume_response(response, request_id).await
+            self.consume_response(response, request_id, statement).await
         })
         .await
         .with_context(|| {
@@ -143,6 +143,7 @@ impl SnowflakeClient {
         &self,
         mut response: reqwest::Response,
         request_id: Uuid,
+        statement: &str,
     ) -> Result<QueryResult> {
         loop {
             let status = response.status();
@@ -167,11 +168,12 @@ impl SnowflakeClient {
                 continue;
             }
             if !status.is_success() || !body.is_success() {
-                bail!(
-                    "Snowflake statement failed (HTTP {status}, code {}): {}",
-                    body.code.as_deref().unwrap_or("unknown"),
-                    body.message.as_deref().unwrap_or("unknown error")
-                );
+                let code = body.code.as_deref().unwrap_or("unknown");
+                let message = body.message.as_deref().unwrap_or("unknown error");
+                let hint = privilege_hint(code, message, statement, &self.account)
+                    .map(|value| format!("; {value}"))
+                    .unwrap_or_default();
+                bail!("Snowflake statement failed (HTTP {status}, code {code}): {message}{hint}");
             }
             let handle = body.statement_handle.clone();
             let mut result = QueryResult {
@@ -267,6 +269,44 @@ impl SnowflakeClient {
         if comment != expected {
             bail!(
                 "refusing to drop schema {database}.{schema}: its ownership marker does not match this run"
+            );
+        }
+        self.execute(&format!(
+            "DROP SCHEMA IF EXISTS {}.{}",
+            quote_identifier(database),
+            quote_identifier(schema),
+        ))
+        .await?;
+        Ok(())
+    }
+
+    pub async fn drop_marked_schema(
+        &self,
+        database: &str,
+        schema: &str,
+        prefix: &str,
+    ) -> Result<()> {
+        if !crate::clean::is_managed_prefix(schema, prefix) {
+            bail!("refusing to drop schema {schema}: it is outside the managed prefix {prefix}");
+        }
+        let ownership = self
+            .execute(&format!(
+                "SELECT COMMENT FROM {}.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = {}",
+                quote_identifier(database),
+                quote_string(schema),
+            ))
+            .await?;
+        let Some(comment) = ownership
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(Option::as_deref)
+        else {
+            return Ok(());
+        };
+        if crate::clean::parse_ownership_marker(comment).is_none() {
+            bail!(
+                "refusing to drop schema {database}.{schema}: its Embrasure ownership marker is invalid"
             );
         }
         self.execute(&format!(
@@ -455,6 +495,42 @@ pub fn is_managed_schema(schema: &str, run_schema: &str) -> bool {
     schema == run_schema || schema.starts_with(&format!("{run_schema}_"))
 }
 
+fn privilege_hint(
+    code: &str,
+    message: &str,
+    statement: &str,
+    account: &AccountConfig,
+) -> Option<String> {
+    let upper = statement.trim_start().to_ascii_uppercase();
+    let insufficient = code == "003001"
+        || message
+            .to_ascii_lowercase()
+            .contains("insufficient privilege");
+    let hint = if code == "002003" {
+        "the object may not exist, or the role lacks USAGE on its database or schema".to_owned()
+    } else if insufficient && upper.starts_with("CREATE TRANSIENT SCHEMA") {
+        format!(
+            "role {} needs CREATE SCHEMA on database {}",
+            account.role, account.database
+        )
+    } else if insufficient && upper.starts_with("CREATE TABLE") && upper.contains(" CLONE ") {
+        format!(
+            "role {} needs SELECT on the source and CREATE TABLE on the target schema",
+            account.role
+        )
+    } else if insufficient && upper.starts_with("DROP SCHEMA") {
+        format!(
+            "role {} needs ownership or compatible future grants for the temporary schema",
+            account.role
+        )
+    } else if insufficient {
+        format!("role {} lacks a required Snowflake privilege", account.role)
+    } else {
+        return None;
+    };
+    Some(format!("{hint}; run `embrasure doctor`"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +562,46 @@ mod tests {
         ));
         assert!(!is_managed_schema("EMBRASURE_CHECK_PROD", run));
         assert!(!is_managed_schema("EMBRASURE_CHECK_SHA_TIME_RANDOMLY", run));
+    }
+
+    #[test]
+    fn privilege_errors_include_actionable_hints() {
+        let account = AccountConfig {
+            name: "primary".into(),
+            account: "org-account".into(),
+            user: "DBT_CI".into(),
+            role: "DBT_CI_ROLE".into(),
+            database: "ANALYTICS".into(),
+            warehouse: "DBT_CI_WH".into(),
+            production_schema: "PROD".into(),
+            selector: None,
+            auth: AuthConfig::OauthLocal,
+        };
+        assert!(
+            privilege_hint("003001", "denied", "CREATE TRANSIENT SCHEMA x.y", &account)
+                .unwrap()
+                .contains("CREATE SCHEMA on database ANALYTICS")
+        );
+        assert!(
+            privilege_hint(
+                "003001",
+                "denied",
+                "CREATE TABLE x.y.z CLONE a.b.c",
+                &account
+            )
+            .unwrap()
+            .contains("SELECT on the source")
+        );
+        assert!(
+            privilege_hint("003001", "denied", "DROP SCHEMA x.y", &account)
+                .unwrap()
+                .contains("ownership")
+        );
+        assert!(
+            privilege_hint("002003", "missing", "SELECT 1", &account)
+                .unwrap()
+                .contains("may not exist")
+        );
     }
 
     #[test]
