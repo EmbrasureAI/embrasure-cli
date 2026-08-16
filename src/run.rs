@@ -139,16 +139,18 @@ async fn execute(
 
             let mut context = dbt::prepare(config, &resolved_auth, base, &schema, &query_tag)?;
             let selections = plan_selections(config, &context, options, report)?;
+            if dry_run {
+                report.notices.push(Notice {
+                    scope: "validation".into(),
+                    code: "dry_run".into(),
+                    message:
+                        "planned validation without creating schemas or querying warehouse data"
+                            .into(),
+                });
+            }
             let result = if let Some(selections) = selections {
                 if dry_run {
                     plan_model_reports(config, &context, &selections, "planned", report)?;
-                    report.notices.push(Notice {
-                        scope: "validation".into(),
-                        code: "dry_run".into(),
-                        message:
-                            "planned validation without creating schemas or querying warehouse data"
-                                .into(),
-                    });
                     Ok(())
                 } else {
                     execute_with_dbt(config, &mut context, &clients, &schema, &selections, report)
