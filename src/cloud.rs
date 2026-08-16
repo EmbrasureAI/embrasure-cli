@@ -326,7 +326,10 @@ pub fn cached_review(snapshot: &PreparedSnapshot) -> Result<Option<Report>> {
             return Err(error).with_context(|| format!("could not read {}", path.display()));
         }
     };
-    Ok((cache.fingerprint == snapshot.fingerprint).then_some(cache.report))
+    Ok(
+        (cache.fingerprint == snapshot.fingerprint && cache_is_fresh(&cache.saved_at))
+            .then_some(cache.report),
+    )
 }
 
 pub fn save_review(snapshot: &PreparedSnapshot, report: &Report) -> Result<()> {
@@ -702,6 +705,14 @@ fn write_private_json(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+fn cache_is_fresh(saved_at: &str) -> bool {
+    let Ok(saved_at) = DateTime::parse_from_rfc3339(saved_at) else {
+        return false;
+    };
+    let age = Utc::now().signed_duration_since(saved_at.with_timezone(&Utc));
+    age >= chrono::Duration::zero() && age <= chrono::Duration::hours(1)
+}
+
 fn git_path(cwd: &Path, args: &[&str]) -> Result<PathBuf> {
     Ok(PathBuf::from(git_text(cwd, args)?).canonicalize()?)
 }
@@ -1002,5 +1013,14 @@ mod tests {
             "Connect this GitHub dbt project."
         );
         assert_eq!(api_error("not-json"), "request failed");
+    }
+
+    #[test]
+    fn local_review_cache_is_only_reused_immediately() {
+        assert!(cache_is_fresh(&Utc::now().to_rfc3339()));
+        assert!(!cache_is_fresh(
+            &(Utc::now() - chrono::Duration::hours(2)).to_rfc3339()
+        ));
+        assert!(!cache_is_fresh("not-a-timestamp"));
     }
 }
