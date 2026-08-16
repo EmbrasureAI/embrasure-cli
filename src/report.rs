@@ -1,7 +1,7 @@
 use std::{fmt::Write as _, fs, path::Path};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{CrossAccountDependency, DownstreamPolicy, Thresholds};
 
@@ -10,7 +10,7 @@ pub const EXIT_FINDINGS: u8 = 1;
 pub const EXIT_INCOMPLETE: u8 = 2;
 pub const EXIT_EXECUTION: u8 = 3;
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Pass,
@@ -19,7 +19,7 @@ pub enum Status {
     ExecutionFailure,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Report {
     pub schema_version: u8,
     pub status: Status,
@@ -37,7 +37,7 @@ pub struct Report {
     pub execution_errors: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CiSchema {
     pub account: String,
     pub database: String,
@@ -45,7 +45,7 @@ pub struct CiSchema {
     pub cleaned_up: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Summary {
     pub models_selected: usize,
     pub models_built: usize,
@@ -54,7 +54,7 @@ pub struct Summary {
     pub coverage_gaps: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelReport {
     pub unique_id: String,
     pub name: String,
@@ -66,7 +66,7 @@ pub struct ModelReport {
     pub comparison: Option<ModelComparison>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelComparison {
     pub ci_row_count: u64,
     pub production_row_count: u64,
@@ -75,7 +75,7 @@ pub struct ModelComparison {
     pub primary_key: Option<PrimaryKeyComparison>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ColumnComparison {
     pub name: String,
     pub ci_type: Option<String>,
@@ -84,7 +84,7 @@ pub struct ColumnComparison {
     pub production: Option<ColumnMetrics>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ColumnMetrics {
     pub null_count: u64,
     pub null_rate: f64,
@@ -103,7 +103,7 @@ pub struct ColumnMetrics {
     pub p95: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PrimaryKeyComparison {
     pub columns: Vec<String>,
     pub ci_only_count: u64,
@@ -119,28 +119,28 @@ pub struct PrimaryKeyComparison {
     pub ci_duplicate_examples: Vec<Vec<Option<String>>>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Finding {
     pub model: String,
     pub check: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CoverageGap {
     pub scope: String,
     pub check: String,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Notice {
     pub scope: String,
     pub code: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ValidationScope {
     pub downstream: DownstreamPolicy,
     pub impacted_models: usize,
@@ -149,13 +149,13 @@ pub struct ValidationScope {
     pub skipped_models: Vec<SkippedModel>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SkippedModel {
     pub id: String,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ImpactReport {
     pub dbt_models: Vec<ImpactedAsset>,
     pub dbt_exposures: Vec<ImpactedAsset>,
@@ -165,7 +165,7 @@ pub struct ImpactReport {
     pub cross_account_dependencies: Vec<CrossAccountDependency>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ImpactedAsset {
     pub id: String,
     pub name: String,
@@ -173,7 +173,7 @@ pub struct ImpactedAsset {
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LineageEdge {
     pub from: String,
     pub from_name: String,
@@ -181,14 +181,14 @@ pub struct LineageEdge {
     pub to_name: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum LineageChangeKind {
     Added,
     Removed,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LineageChange {
     pub change: LineageChangeKind,
     pub edge: LineageEdge,

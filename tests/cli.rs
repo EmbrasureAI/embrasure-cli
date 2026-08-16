@@ -12,7 +12,8 @@ fn help_exposes_enterprise_setup_commands() {
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("check"))
         .stdout(predicate::str::contains("doctor"))
-        .stdout(predicate::str::contains("auth"));
+        .stdout(predicate::str::contains("auth"))
+        .stdout(predicate::str::contains("cloud"));
 }
 
 #[test]
@@ -187,4 +188,39 @@ fn legacy_report_version_requires_json_output() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("--json"));
+}
+
+#[test]
+fn check_exposes_explicit_cloud_handoff_controls() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--cloud"))
+        .stdout(predicate::str::contains("--context <BUSINESS_INTENT>"))
+        .stdout(predicate::str::contains("--context-file <PATH>"));
+}
+
+#[test]
+fn cloud_context_cannot_accidentally_enable_network_handoff() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--context", "one row per order"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--cloud"));
+}
+
+#[test]
+fn cloud_subcommands_are_discoverable() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["cloud", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("login"))
+        .stdout(predicate::str::contains("whoami"))
+        .stdout(predicate::str::contains("logout"))
+        .stdout(predicate::str::contains("status"));
 }

@@ -40,6 +40,16 @@ embrasure doctor
 embrasure check --base origin/main
 ```
 
+Hand the exact reviewed working state to a durable cloud agent only when you choose:
+
+```bash
+embrasure cloud login
+embrasure check --base origin/main --cloud \
+  --context "Preserve one row per order. Refunds reduce net revenue. Missing discounts are zero."
+```
+
+`--cloud` requires business intent, prints every eligible path before upload, and reuses the immediately preceding local review only when the repository, dbt root, base SHA, working-tree snapshot, CLI version, and check configuration all match. Local `embrasure check` remains private and account-free.
+
 Example result:
 
 ```text
