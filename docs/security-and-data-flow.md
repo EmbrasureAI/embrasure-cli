@@ -53,7 +53,7 @@ Snowflake returns the comparison evidence used in the local report:
 - Snowflake types
 - Row counts, null rates, cardinality, min/max values, averages, and percentiles
 - Counts of primary-key values found on only one side, duplicate rows, and null-key rows
-- Optional deterministic primary-key and duplicate-key examples, up to `safety.primary_key_sample_limit`
+- Optional stably ordered primary-key and duplicate-key examples, up to `safety.primary_key_sample_limit`
 
 Set `primary_key_sample_limit: 0` when key values must not appear in process memory or JSON output. Reports are written to stdout unless `--markdown <path>` is provided.
 

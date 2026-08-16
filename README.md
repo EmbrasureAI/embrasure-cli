@@ -7,31 +7,47 @@
 
 <p align="center"><strong>Catch unexpected data changes before a dbt PR is reviewed.</strong></p>
 
-Embrasure builds the dbt models changed on your branch and the paths to critical downstream models in temporary Snowflake schemas. It compares them with production, runs your existing dbt tests, reports the full downstream impact, and removes the schemas when it finishes.
+Embrasure builds changed dbt models and paths to critical downstream models in temporary Snowflake schemas. It runs existing dbt tests, compares candidate data with production, reports downstream impact, and removes the schemas.
 
-Use it locally or in CI. It connects directly to Snowflake, so no Embrasure account or hosted service is required.
+Local checks connect directly to Snowflake. They require no Embrasure account or hosted service.
 
 ## What it catches
 
 - Columns added, removed, renamed, or changed to an incompatible type
-- Unexpected shifts in row counts, null rates, cardinality, ranges, averages, and percentiles
+- Shifts in row counts, null rates, cardinality, ranges, averages, and percentiles
 - Primary-key values that appear or disappear
-- Duplicate and null primary keys introduced by the branch
-- Failures in your existing dbt tests
-- Downstream dbt models, exposures, cross-account dependencies, and optional Metabase dashboards affected by the change
-- Models affected by non-dbt changes you map in the configuration
+- Duplicate or null primary keys introduced by a branch
+- Existing dbt test failures
+- Affected dbt models and exposures
+- Declared cross-account dependencies
+- Optional Metabase dashboards
+- Models mapped to non-dbt file changes
 
-## Run it locally
+## Install
 
-You need Git and dbt Core with the Snowflake adapter. You do not need Rust or an Embrasure account.
+You need Git, dbt Core 1.5 or newer, and dbt-snowflake 1.5 or newer. Embrasure uses `dbt parse --target-path`, state selection, JSON `--output-keys`, and deferred builds. These interfaces are present in dbt Core 1.5. You do not need Rust.
 
-Install the CLI on macOS or Linux:
+```sh
+python -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2"
+```
+
+Install Embrasure on macOS or Linux with Homebrew:
 
 ```sh
 brew install embrasureai/tap/embrasure
 ```
 
-From your dbt project, run the guided setup. It reads your existing dbt profile and only asks for anything it cannot find.
+Or use the verified installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/install.sh | sh
+```
+
+The installer verifies `SHA256SUMS` and writes to `/usr/local/bin` when writable, otherwise `~/.local/bin`. Set `EMBRASURE_INSTALL_DIR` to choose another directory.
+
+## First check
+
+Run from the dbt project directory:
 
 ```sh
 embrasure init
@@ -40,15 +56,7 @@ embrasure doctor
 embrasure check --base origin/main
 ```
 
-Hand the exact reviewed working state to a durable cloud agent only when you choose:
-
-```bash
-embrasure cloud login
-embrasure check --base origin/main --cloud \
-  --context "Preserve one row per order. Refunds reduce net revenue. Missing discounts are zero."
-```
-
-`--cloud` requires business intent, prints every eligible path before upload, and reuses the immediately preceding local review only when the repository, dbt root, base SHA, working-tree snapshot, CLI version, and check configuration all match. Local `embrasure check` remains private and account-free.
+`init` reads the active dbt profile and asks only for missing values. Use `--config <path>` before or after any subcommand to choose another config file.
 
 Example result:
 
@@ -58,28 +66,39 @@ embrasure: PASS
 5 impacted · 2 validated · 3 not validated
 ```
 
-The default checks changed models plus every path to critical models: models tagged `critical`, marked critical in Embrasure, or directly used by a dbt exposure. Use `--downstream all` for every downstream model or `--downstream none` for changed models only. The complete impact is reported in every mode.
+The default validates changed models and every path to a critical model. Critical targets are tagged `critical`, configured with `critical: true`, or used directly by a dbt exposure. Use `--downstream all` for every downstream model or `--downstream none` for changed models only. Impact is always computed from the full changed set.
 
-## Use it with an agent or CI
+## Focus and preview
 
-JSON output is versioned and deterministic. Progress goes to stderr so stdout contains one JSON document.
+Intersect the changed set with one or more explicit models:
 
 ```sh
-embrasure check --base origin/main --json
-embrasure check --base origin/main --json --markdown embrasure-check.md
+embrasure check --select orders --select order_items
+embrasure check --select orders --downstream none
 ```
 
-For a faster first pass on large tables, add `--mode quick`. Deep mode remains the default and includes exact cardinality plus numeric percentiles. Primary-key integrity remains exact in both modes.
+An unknown, ambiguous, unchanged, or out-of-scope selection fails instead of returning a misleading pass.
 
-The intended agent loop is simple:
+Preview the plan without creating schemas or querying warehouse data:
 
-```text
-Run `embrasure check --base origin/main --json`.
-Exit 1: fix every finding and rerun.
-Exit 2: resolve or explain every coverage gap.
-Exit 3: fix the setup or execution failure.
-Do not request review until it exits 0.
+```sh
+embrasure check --dry-run
+embrasure check --dry-run --json
 ```
+
+Dry runs still resolve credentials and run local dbt parsing. `--dry-run` cannot be combined with `--cloud`.
+
+## Reports and exit codes
+
+JSON output is versioned and stably ordered. Progress goes to stderr, so stdout contains one JSON document.
+
+```sh
+embrasure check --json
+embrasure check --json --markdown embrasure-check.md
+embrasure check --json --report-version 1
+```
+
+Published contracts: [report v1](schemas/report-v1.schema.json) and [report v2](schemas/report-v2.schema.json).
 
 | Exit code | Meaning |
 |---:|---|
@@ -88,33 +107,115 @@ Do not request review until it exits 0.
 | `2` | A requested check could not be completed |
 | `3` | Setup, execution, or cleanup failed |
 
-## Advanced setup
+Agent loop:
 
-The guided setup creates the smallest configuration needed for one Snowflake account. For service credentials, multiple accounts, critical-model policies, primary keys, large-table filters, per-model thresholds, concurrency and time limits, non-dbt changes, cross-account dependencies, or Metabase, use the [example configuration](embrasure-check.example.yml) and [enterprise setup guide](docs/enterprise.md).
+```text
+Run `embrasure check --base origin/main --json`.
+Exit 1: fix every finding and rerun.
+Exit 2: resolve or explain every coverage gap.
+Exit 3: fix the setup or execution failure.
+Request review only after exit 0.
+```
 
-## Safety
+For a faster first pass on large tables, add `--mode quick`. Quick mode estimates cardinality and skips percentiles. Deep mode is the default. Primary-key integrity stays exact in both modes.
 
-Embrasure uses a dedicated warehouse, query tags, statement timeouts, and a configurable model limit. Every temporary schema has a unique name and ownership marker. The CLI checks both before dropping it and treats cleanup failures as execution failures.
+## GitHub Actions
 
-Use a Snowflake role that can read and clone production tables under test and create temporary schemas in each relevant database. Credentials are never written to reports or normal terminal output.
+The composite action installs the CLI. Keep the check in a visible `run` step so exit codes and secrets remain explicit.
 
-See [Security and data flow](docs/security-and-data-flow.md) for the exact network connections, local files, data returned from Snowflake, credential handling, cleanup behavior, and release-verification steps.
+```yaml
+jobs:
+  embrasure:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2"
+      - uses: EmbrasureAI/embrasure-cli@v1
+      - run: embrasure check --base origin/main --json
+        env:
+          SNOWFLAKE_PROGRAMMATIC_ACCESS_TOKEN: ${{ secrets.SNOWFLAKE_PROGRAMMATIC_ACCESS_TOKEN }}
+```
 
-## Releases
+`fetch-depth: 0` is required because selection compares the working tree with the base revision.
 
-Intel and ARM downloads for macOS and Linux are available on the [releases page](https://github.com/EmbrasureAI/embrasure-cli/releases). Each release includes SHA-256 checksums, an SPDX software bill of materials, and GitHub-signed build-provenance attestations.
+## Cloud handoff
 
-If you previously installed `@embrasure/cli` with npm, uninstall it first with `npm uninstall -g @embrasure/cli` so the two executables do not conflict.
+Cloud handoff is optional. It sends the exact reviewed state and local evidence to a durable agent:
+
+```sh
+embrasure cloud login
+embrasure cloud whoami
+embrasure check --cloud \
+  --context "Preserve one row per order. Refunds reduce net revenue. Missing discounts are zero."
+embrasure cloud status
+```
+
+`--cloud` requires business intent and prints every eligible path before upload. A plain `check` primes the local review cache. The next `check --cloud` reuses it only when the repository, dbt root, base SHA, snapshot, CLI version, and check configuration match. Run `embrasure auth status` or `embrasure cloud whoami` to inspect session readiness without printing secrets.
+
+## Maintenance
+
+List managed temporary schemas older than six hours:
+
+```sh
+embrasure clean
+embrasure clean --older-than 24 --yes
+```
+
+`clean` searches only configured account databases and verifies the prefix and ownership marker before removal.
+
+Check for or install an update:
+
+```sh
+embrasure update --check
+embrasure update
+```
+
+Generate shell completion scripts:
+
+```sh
+embrasure completion bash
+embrasure completion zsh
+embrasure completion fish
+```
+
+## Troubleshooting
+
+### Generated schema is outside the run namespace
+
+Your `generate_schema_name` macro must preserve the complete target schema. Make custom schemas children of `target.schema`; do not replace it.
+
+### Incremental relation cannot be cloned
+
+Snowflake zero-copy `CREATE TABLE ... CLONE` supports tables, not every relation type. Use `--incremental-mode full-refresh` when a full rebuild is acceptable, or exclude the model from this validation path.
+
+### Incremental candidate seeding fails
+
+The validation role needs `SELECT` on the production source and `CREATE TABLE` in the target schema. Run `embrasure doctor`. If the relation should not use clone mode, rerun with `--incremental-mode full-refresh`.
+
+## Configuration and safety
+
+See the [example configuration](embrasure-check.example.yml) and [enterprise setup guide](docs/enterprise.md) for service credentials, multiple accounts, model policies, filters, thresholds, concurrency, external changes, cross-account dependencies, Metabase, and grants.
+
+Every temporary schema has a unique name and ownership marker. Embrasure checks both before removal and treats cleanup failures as execution failures. Use a dedicated role that can read and clone only the production tables under test and create temporary schemas in the required databases.
+
+[Security and data flow](docs/security-and-data-flow.md) documents network connections, local files, returned data, credentials, cleanup, updates, and release verification.
 
 ## Current limits
 
 - Snowflake is the only supported warehouse.
-- dbt model lineage and exposures are authoritative. dbt artifacts alone cannot provide authoritative warehouse-to-dashboard column lineage; the CLI states this as an informational limit.
-- Metabase matching covers native SQL cards that reference fully qualified production relations. Unsupported or inaccessible metadata is reported as a coverage gap.
+- dbt artifacts provide model lineage and exposures, not authoritative warehouse-to-dashboard column lineage.
+- Metabase matching covers native SQL cards that reference fully qualified production relations. Unsupported or inaccessible metadata becomes a coverage gap.
 
 ## Development
 
-Rust 1.85 or newer is required only when building from source.
+Rust 1.85 or newer is required when building from source.
 
 ```sh
 cargo fmt --check
@@ -122,6 +223,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
 ```
 
-The opt-in Snowflake suite is gated by `EMBRASURE_RUN_SNOWFLAKE_TESTS=1` and the `EMBRASURE_TEST_SNOWFLAKE_*` account, user, role, database, warehouse, and token variables. It exercises two schemas, zero-copy incremental seeding, full refresh, duplicate detection, cleanup, and 100,000 synthetic rows.
+The opt-in Snowflake suite uses `EMBRASURE_RUN_SNOWFLAKE_TESTS=1` and the `EMBRASURE_TEST_SNOWFLAKE_*` account, user, role, database, warehouse, and token variables.
 
 Contributions are welcome under the [Apache 2.0 license](LICENSE).
