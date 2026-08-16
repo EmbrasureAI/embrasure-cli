@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Catch unexpected data changes before a dbt PR is reviewed.</strong></p>
 
-Embrasure builds changed dbt models and paths to critical downstream models in temporary Snowflake schemas. It runs existing dbt tests, compares candidate data with production, reports downstream impact, and removes the schemas.
+Embrasure checks dbt changes against production before you merge. It builds each changed model, plus the path to any critical model downstream, in temporary Snowflake schemas. Then it runs your existing dbt tests, compares the results, shows what is affected, and cleans up.
 
 Local checks connect directly to Snowflake. They require no Embrasure account or hosted service.
 
@@ -24,21 +24,26 @@ Local checks connect directly to Snowflake. They require no Embrasure account or
 - Optional Metabase dashboards
 - Models mapped to non-dbt file changes
 
-## Install
+## Quickstart
 
-You need Git, dbt Core 1.5 or newer, and dbt-snowflake 1.5 or newer. Embrasure uses `dbt parse --target-path`, state selection, JSON `--output-keys`, and deferred builds. These interfaces are present in dbt Core 1.5. You do not need Rust.
+From your dbt project directory:
+
+```sh
+brew install embrasureai/tap/embrasure
+embrasure init
+embrasure auth login
+embrasure check
+```
+
+`init` reads your active dbt profile and asks only for missing values. `check` compares your branch with `origin/main` by default.
+
+You need Git, dbt Core 1.5 or newer, and dbt-snowflake 1.5 or newer. You do not need Rust. If you do not have dbt installed yet:
 
 ```sh
 python -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2"
 ```
 
-Install Embrasure on macOS or Linux with Homebrew:
-
-```sh
-brew install embrasureai/tap/embrasure
-```
-
-Or use the verified installer:
+If you do not use Homebrew, use the verified installer:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/install.sh | sh
@@ -46,18 +51,7 @@ curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/inst
 
 The installer verifies `SHA256SUMS` and writes to `/usr/local/bin` when writable, otherwise `~/.local/bin`. Set `EMBRASURE_INSTALL_DIR` to choose another directory.
 
-## First check
-
-Run from the dbt project directory:
-
-```sh
-embrasure init
-embrasure auth login
-embrasure doctor
-embrasure check --base origin/main
-```
-
-`init` reads the active dbt profile and asks only for missing values. Use `--config <path>` before or after any subcommand to choose another config file.
+Use `--config <path>` before or after any subcommand to choose another config file. Run `embrasure doctor` if you need help with setup.
 
 Example result:
 
