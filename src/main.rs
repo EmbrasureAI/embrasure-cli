@@ -9,6 +9,7 @@ mod git;
 mod init;
 mod loopback;
 mod metabase;
+mod query;
 mod report;
 mod run;
 mod snowflake;
@@ -112,7 +113,7 @@ enum Command {
         #[arg(long, hide = true)]
         production_schema: Option<String>,
     },
-    /// Build and compare changed dbt models.
+    /// Build and compare changed dbt models, then run configured query checks.
     #[command(alias = "run")]
     Check {
         /// Git revision used as the production comparison base.
@@ -359,7 +360,7 @@ async fn main() -> ExitCode {
                     report.finalize();
                 }
             }
-            let report_version = report_version.unwrap_or(report::ReportVersion::V2);
+            let report_version = report_version.unwrap_or(report::ReportVersion::V3);
             if use_cloud {
                 if report.exit_code == report::EXIT_EXECUTION {
                     if json {

@@ -134,7 +134,7 @@ embrasure check --base origin/main --json --markdown embrasure-check.md
 
 Exit `0` is ready for review, `1` is a finding, `2` is missing evidence, and `3` is a setup or execution failure.
 
-Report v2 is the default JSON contract. It includes validation scope, skipped models, notices, duplicate and null-key metrics, build strategy, and dbt topology changes. Legacy consumers can request v1 with `--json --report-version 1`.
+Report v3 is the default JSON contract and adds query-diff evidence. V1 and v2 remain unchanged compatibility projections and can be requested with `--json --report-version 1` or `--json --report-version 2`.
 
 ## Reference
 
@@ -151,7 +151,9 @@ validation:
 
 Override policy with `--downstream` and repeatable `--critical-tag`. Use repeatable `--select` to intersect the resulting validation set. Excluded models remain visible as not validated.
 
-If selection exceeds `safety.max_models`, Embrasure exits `2` before dbt builds or comparisons. It does not truncate the set. Independent comparisons run concurrently up to `comparison.concurrency`.
+If selection exceeds `safety.max_models`, Embrasure exits `2` before dbt model builds. It does not truncate the set. Ref-free and production-only query checks can still run because they need no candidate build. Independent comparisons run concurrently up to `comparison.concurrency`.
+
+Query checks are activated when referenced models are impacted or when the check definition changed since the base revision. Checks removed from the configuration produce an explicit coverage gap. Each side is materialized once in a dedicated run-owned schema before exact keyed or bag-semantic comparison.
 
 Quick mode is the inexpensive first pass:
 

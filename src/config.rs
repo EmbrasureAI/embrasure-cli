@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
     pub version: u8,
     #[serde(default)]
     pub dbt: DbtConfig,
@@ -24,6 +26,8 @@ pub struct Config {
     pub accounts: Vec<AccountConfig>,
     #[serde(default)]
     pub models: BTreeMap<String, ModelConfig>,
+    #[serde(default)]
+    pub checks: Vec<CheckConfig>,
     #[serde(default)]
     pub external_changes: Vec<ExternalChange>,
     #[serde(default)]
@@ -70,6 +74,10 @@ pub struct SafetyConfig {
     pub max_columns_per_model: usize,
     #[serde(default = "default_pk_limit")]
     pub primary_key_sample_limit: usize,
+    #[serde(default = "default_max_query_checks")]
+    pub max_query_checks: usize,
+    #[serde(default = "default_max_example_value_chars")]
+    pub max_example_value_chars: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,6 +155,33 @@ impl Default for SafetyConfig {
             max_models: default_max_models(),
             max_columns_per_model: default_max_columns(),
             primary_key_sample_limit: default_pk_limit(),
+            max_query_checks: default_max_query_checks(),
+            max_example_value_chars: default_max_example_value_chars(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CheckConfig {
+    QueryDiff(QueryDiffConfig),
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QueryDiffConfig {
+    pub name: String,
+    pub account: Option<String>,
+    pub sql: String,
+    pub production_sql: Option<String>,
+    #[serde(default)]
+    pub primary_key: Vec<String>,
+}
+
+impl CheckConfig {
+    pub fn query_diff(&self) -> &QueryDiffConfig {
+        match self {
+            Self::QueryDiff(check) => check,
         }
     }
 }
@@ -288,8 +323,12 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let bytes =
             fs::read(path).with_context(|| format!("could not read config {}", path.display()))?;
-        let config: Self = serde_yaml::from_slice(&bytes)
+        let mut config: Self = serde_yaml::from_slice(&bytes)
             .with_context(|| format!("invalid config {}", path.display()))?;
+        config.source_path = Some(
+            path.canonicalize()
+                .with_context(|| format!("could not resolve config {}", path.display()))?,
+        );
         config.validate()?;
         Ok(config)
     }
@@ -315,8 +354,21 @@ impl Config {
         {
             bail!("every account needs a dbt selector when multiple accounts are configured");
         }
-        if self.safety.max_models == 0 || self.safety.max_columns_per_model == 0 {
-            bail!("safety model and column limits must be greater than zero");
+        if self.safety.max_models == 0
+            || self.safety.max_columns_per_model == 0
+            || self.safety.max_query_checks == 0
+            || self.safety.max_example_value_chars == 0
+        {
+            bail!(
+                "safety model, column, query-check, and example limits must be greater than zero"
+            );
+        }
+        if self.checks.len() > self.safety.max_query_checks {
+            bail!(
+                "{} checks exceed safety.max_query_checks {}",
+                self.checks.len(),
+                self.safety.max_query_checks
+            );
         }
         if self.safety.statement_timeout_seconds == 0 {
             bail!("statement timeout must be greater than zero");
@@ -432,6 +484,55 @@ impl Config {
                 }
             }
         }
+        let mut check_names = BTreeSet::new();
+        for check in &self.checks {
+            let check = check.query_diff();
+            if check.name.trim().is_empty() {
+                bail!("query-diff check names must not be empty");
+            }
+            if !check_names.insert(check.name.to_ascii_lowercase()) {
+                bail!("query-diff check names must be unique (case-insensitive)");
+            }
+            if self.accounts.len() > 1 && check.account.is_none() {
+                bail!(
+                    "check {} needs an account when multiple accounts are configured",
+                    check.name
+                );
+            }
+            if let Some(account) = &check.account {
+                if !self
+                    .accounts
+                    .iter()
+                    .any(|candidate| candidate.name == *account)
+                {
+                    bail!("check {} references unknown account {account}", check.name);
+                }
+            }
+            crate::query::QueryTemplate::parse(&check.sql)
+                .with_context(|| format!("invalid SQL template for check {}", check.name))?;
+            if let Some(sql) = &check.production_sql {
+                crate::query::QueryTemplate::parse(sql).with_context(|| {
+                    format!("invalid production_sql template for check {}", check.name)
+                })?;
+            }
+            if check.primary_key.iter().any(|key| key.trim().is_empty()) {
+                bail!(
+                    "check {} primary_key must not contain empty columns",
+                    check.name
+                );
+            }
+            let distinct_keys = check
+                .primary_key
+                .iter()
+                .map(|key| key.to_ascii_lowercase())
+                .collect::<BTreeSet<_>>();
+            if distinct_keys.len() != check.primary_key.len() {
+                bail!(
+                    "check {} primary_key columns must be unique (case-insensitive)",
+                    check.name
+                );
+            }
+        }
         if let Some(metabase) = &self.metabase {
             let url = url::Url::parse(&metabase.url).context("metabase.url is invalid")?;
             if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
@@ -539,6 +640,12 @@ fn default_max_columns() -> usize {
 fn default_pk_limit() -> usize {
     20
 }
+fn default_max_query_checks() -> usize {
+    20
+}
+fn default_max_example_value_chars() -> usize {
+    512
+}
 fn default_comparison_concurrency() -> usize {
     4
 }
@@ -604,6 +711,59 @@ accounts:
     fn example_config_stays_valid() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("embrasure-check.example.yml");
         Config::load(&path).unwrap();
+    }
+
+    #[test]
+    fn arbitrary_query_checks_are_validated_at_config_load() {
+        let valid = r#"
+version: 1
+accounts:
+  - name: primary
+    account: org-one
+    user: ci
+    role: ci
+    database: analytics
+    warehouse: ci
+    production_schema: prod
+    auth: { type: oauth, token_env: TOKEN }
+checks:
+  - type: query_diff
+    name: paid orders
+    sql: select id, amount from {{ ref('orders') }} where status = 'paid'
+    production_sql: select id, amount from {{ ref('legacy_orders') }} where status = 'paid'
+    primary_key: [id]
+"#;
+        let config: Config = serde_yaml::from_str(valid).unwrap();
+        config.validate().unwrap();
+
+        let unsafe_sql = valid.replace(
+            "select id, amount from {{ ref('orders') }} where status = 'paid'",
+            "delete from orders",
+        );
+        let config: Config = serde_yaml::from_str(&unsafe_sql).unwrap();
+        assert!(format!("{:#}", config.validate().unwrap_err()).contains("SELECT"));
+    }
+
+    #[test]
+    fn query_check_budget_and_names_are_enforced() {
+        let yaml = r#"
+version: 1
+safety: { max_query_checks: 1 }
+accounts:
+  - name: primary
+    account: org-one
+    user: ci
+    role: ci
+    database: analytics
+    warehouse: ci
+    production_schema: prod
+    auth: { type: oauth, token_env: TOKEN }
+checks:
+  - { type: query_diff, name: same, sql: "select 1" }
+  - { type: query_diff, name: SAME, sql: "select 1" }
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_err());
     }
 
     #[test]

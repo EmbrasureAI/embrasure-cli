@@ -599,6 +599,32 @@ pub fn prepare(
 }
 
 impl DbtContext {
+    #[cfg(test)]
+    pub fn for_test(
+        repo_root: PathBuf,
+        manifests: BTreeMap<String, Manifest>,
+        production_manifests: BTreeMap<String, Manifest>,
+    ) -> Result<Self> {
+        let scratch = tempfile::tempdir()?;
+        let profiles_dir = scratch.path().join("profiles");
+        fs::create_dir_all(&profiles_dir)?;
+        let mut state_dirs = BTreeMap::new();
+        for account in manifests.keys() {
+            let state = scratch.path().join("state").join(account);
+            fs::create_dir_all(&state)?;
+            state_dirs.insert(account.clone(), state);
+        }
+        Ok(Self {
+            scratch,
+            repo_root,
+            profiles_dir,
+            state_dirs,
+            manifests,
+            production_manifests,
+            base_worktree: None,
+        })
+    }
+
     pub fn manifest(&self, account: &str) -> Result<&Manifest> {
         self.manifests
             .get(account)

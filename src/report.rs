@@ -19,6 +19,8 @@ pub enum ReportVersion {
     V1,
     #[value(name = "2")]
     V2,
+    #[value(name = "3")]
+    V3,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -41,6 +43,8 @@ pub struct Report {
     pub summary: Summary,
     pub validation_scope: ValidationScope,
     pub models: Vec<ModelReport>,
+    #[serde(default)]
+    pub query_checks: Vec<QueryCheckReport>,
     pub impact: ImpactReport,
     pub findings: Vec<Finding>,
     pub coverage_gaps: Vec<CoverageGap>,
@@ -61,8 +65,81 @@ pub struct Summary {
     pub models_selected: usize,
     pub models_built: usize,
     pub models_compared: usize,
+    #[serde(default)]
+    pub query_checks_configured: usize,
+    #[serde(default)]
+    pub query_checks_run: usize,
+    #[serde(default)]
+    pub query_checks_passed: usize,
     pub findings: usize,
     pub coverage_gaps: usize,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryCheckStatus {
+    Planned,
+    Pass,
+    Findings,
+    Incomplete,
+    Skipped,
+    ExecutionFailure,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct QueryCheckReport {
+    pub name: String,
+    pub account: String,
+    pub status: QueryCheckStatus,
+    pub current_refs: Vec<String>,
+    pub production_refs: Vec<String>,
+    pub primary_key: Vec<String>,
+    pub candidate_relation: Option<String>,
+    pub production_relation: Option<String>,
+    pub candidate_row_count: Option<u64>,
+    pub production_row_count: Option<u64>,
+    pub columns: Vec<QueryColumnComparison>,
+    pub comparison: Option<QueryComparison>,
+    pub reason: Option<String>,
+    pub invalid_primary_key_reason: Option<String>,
+    pub examples_truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct QueryColumnComparison {
+    pub name: String,
+    pub candidate_type: Option<String>,
+    pub production_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct QueryComparison {
+    pub candidate_only_rows: u64,
+    pub production_only_rows: u64,
+    pub changed_rows: u64,
+    pub candidate_duplicate_keys: u64,
+    pub production_duplicate_keys: u64,
+    pub candidate_duplicate_rows: u64,
+    pub production_duplicate_rows: u64,
+    pub candidate_null_key_rows: u64,
+    pub production_null_key_rows: u64,
+    pub column_mismatches: Vec<QueryColumnMismatch>,
+    pub examples: Vec<QueryDiffExample>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct QueryColumnMismatch {
+    pub column: String,
+    pub rows: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct QueryDiffExample {
+    pub key: Vec<Option<String>>,
+    pub candidate: Vec<Option<String>>,
+    pub production: Vec<Option<String>>,
+    pub candidate_multiplicity: Option<u64>,
+    pub production_multiplicity: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -208,7 +285,7 @@ pub struct LineageChange {
 impl Report {
     pub fn empty(base: String, thresholds: Thresholds) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             status: Status::Pass,
             exit_code: EXIT_PASS,
             base,
@@ -217,6 +294,7 @@ impl Report {
             summary: Summary::default(),
             validation_scope: ValidationScope::default(),
             models: vec![],
+            query_checks: vec![],
             impact: ImpactReport::default(),
             findings: vec![],
             coverage_gaps: vec![],
@@ -231,6 +309,8 @@ impl Report {
                 .cmp(&b.unique_id)
                 .then(a.account.cmp(&b.account))
         });
+        self.query_checks
+            .sort_by(|a, b| a.name.cmp(&b.name).then(a.account.cmp(&b.account)));
         self.findings.sort();
         self.findings.dedup();
         self.coverage_gaps.sort();
@@ -277,6 +357,22 @@ impl Report {
             .iter()
             .filter(|m| m.comparison.is_some())
             .count();
+        self.summary.query_checks_configured = self.query_checks.len();
+        self.summary.query_checks_run = self
+            .query_checks
+            .iter()
+            .filter(|check| {
+                !matches!(
+                    check.status,
+                    QueryCheckStatus::Planned | QueryCheckStatus::Skipped
+                )
+            })
+            .count();
+        self.summary.query_checks_passed = self
+            .query_checks
+            .iter()
+            .filter(|check| check.status == QueryCheckStatus::Pass)
+            .count();
         self.summary.findings = self.findings.len();
         self.summary.coverage_gaps = self.coverage_gaps.len();
 
@@ -309,10 +405,11 @@ impl Report {
             Status::ExecutionFailure => style.bad("EXECUTION FAILURE"),
         };
         let mut output = format!(
-            "embrasure: {label}\n{} selected · {} built · {} compared · {} findings · {} coverage gaps\n{} impacted · {} validated · {} not validated\n",
+            "embrasure: {label}\n{} selected · {} built · {} compared · {} query checks run · {} findings · {} coverage gaps\n{} impacted · {} validated · {} not validated\n",
             self.summary.models_selected,
             self.summary.models_built,
             self.summary.models_compared,
+            self.summary.query_checks_run,
             self.summary.findings,
             self.summary.coverage_gaps,
             self.validation_scope.impacted_models,
@@ -329,6 +426,16 @@ impl Report {
         }
         for error in &self.execution_errors {
             let _ = writeln!(output, "- [error] {error}");
+        }
+        for check in &self.query_checks {
+            let _ = writeln!(
+                output,
+                "- [query:{:?}] {} ({}): {}",
+                check.status,
+                check.name,
+                check.account,
+                check.reason.as_deref().unwrap_or("comparison complete")
+            );
         }
         let visible_notices = if verbose { self.notices.len() } else { 3 };
         for notice in self.notices.iter().take(visible_notices) {
@@ -399,7 +506,8 @@ impl Report {
     pub fn json_value(&self, version: ReportVersion) -> serde_json::Result<serde_json::Value> {
         match version {
             ReportVersion::V1 => serde_json::to_value(ReportV1::from(self)),
-            ReportVersion::V2 => serde_json::to_value(self),
+            ReportVersion::V2 => serde_json::to_value(ReportV2::from(self)),
+            ReportVersion::V3 => serde_json::to_value(self),
         }
     }
 
@@ -414,10 +522,11 @@ impl Report {
         let _ = writeln!(output, "**Exit code:** `{}`\n", self.exit_code);
         let _ = writeln!(
             output,
-            "| Selected | Built | Compared | Findings | Coverage gaps |\n|---:|---:|---:|---:|---:|\n| {} | {} | {} | {} | {} |\n",
+            "| Selected | Built | Compared | Query checks | Findings | Coverage gaps |\n|---:|---:|---:|---:|---:|---:|\n| {} | {} | {} | {} | {} | {} |\n",
             self.summary.models_selected,
             self.summary.models_built,
             self.summary.models_compared,
+            self.summary.query_checks_run,
             self.summary.findings,
             self.summary.coverage_gaps,
         );
@@ -482,6 +591,35 @@ impl Report {
                 "- **{} · {}:** {}",
                 notice.scope, notice.code, notice.message
             );
+        }
+        output.push_str("\n## Query-diff evidence\n\n");
+        if self.query_checks.is_empty() {
+            output.push_str("No query-diff checks configured.\n\n");
+        }
+        for check in &self.query_checks {
+            let _ = writeln!(output, "### `{}` ({})\n", check.name, check.account);
+            let _ = writeln!(output, "- Status: `{:?}`", check.status);
+            if let (Some(candidate), Some(production)) =
+                (check.candidate_row_count, check.production_row_count)
+            {
+                let _ = writeln!(
+                    output,
+                    "- Rows: candidate `{candidate}` · production `{production}`"
+                );
+            }
+            if let Some(comparison) = &check.comparison {
+                let _ = writeln!(
+                    output,
+                    "- Difference: `{}` candidate-only · `{}` production-only · `{}` changed",
+                    comparison.candidate_only_rows,
+                    comparison.production_only_rows,
+                    comparison.changed_rows
+                );
+            }
+            if let Some(reason) = &check.reason {
+                let _ = writeln!(output, "- {reason}");
+            }
+            output.push('\n');
         }
         output.push_str("\n## Model evidence\n\n");
         if self.models.is_empty() {
@@ -763,6 +901,66 @@ fn write_lineage_node<'a>(
 }
 
 #[derive(Serialize)]
+struct ReportV2<'a> {
+    schema_version: u8,
+    status: Status,
+    exit_code: u8,
+    base: &'a str,
+    ci_schemas: &'a [CiSchema],
+    thresholds: Thresholds,
+    summary: SummaryV2,
+    validation_scope: &'a ValidationScope,
+    models: &'a [ModelReport],
+    impact: &'a ImpactReport,
+    findings: &'a [Finding],
+    coverage_gaps: &'a [CoverageGap],
+    notices: &'a [Notice],
+    execution_errors: &'a [String],
+}
+
+#[derive(Serialize)]
+struct SummaryV2 {
+    models_selected: usize,
+    models_built: usize,
+    models_compared: usize,
+    findings: usize,
+    coverage_gaps: usize,
+}
+
+impl From<&Summary> for SummaryV2 {
+    fn from(summary: &Summary) -> Self {
+        Self {
+            models_selected: summary.models_selected,
+            models_built: summary.models_built,
+            models_compared: summary.models_compared,
+            findings: summary.findings,
+            coverage_gaps: summary.coverage_gaps,
+        }
+    }
+}
+
+impl<'a> From<&'a Report> for ReportV2<'a> {
+    fn from(report: &'a Report) -> Self {
+        Self {
+            schema_version: 2,
+            status: report.status,
+            exit_code: report.exit_code,
+            base: &report.base,
+            ci_schemas: &report.ci_schemas,
+            thresholds: report.thresholds,
+            summary: SummaryV2::from(&report.summary),
+            validation_scope: &report.validation_scope,
+            models: &report.models,
+            impact: &report.impact,
+            findings: &report.findings,
+            coverage_gaps: &report.coverage_gaps,
+            notices: &report.notices,
+            execution_errors: &report.execution_errors,
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct ReportV1<'a> {
     schema_version: u8,
     status: Status,
@@ -770,7 +968,7 @@ struct ReportV1<'a> {
     base: &'a str,
     ci_schemas: &'a [CiSchema],
     thresholds: Thresholds,
-    summary: &'a Summary,
+    summary: SummaryV2,
     models: Vec<ModelReportV1<'a>>,
     impact: ImpactReportV1<'a>,
     findings: &'a [Finding],
@@ -824,7 +1022,7 @@ impl<'a> From<&'a Report> for ReportV1<'a> {
             base: &report.base,
             ci_schemas: &report.ci_schemas,
             thresholds: report.thresholds,
-            summary: &report.summary,
+            summary: SummaryV2::from(&report.summary),
             models: report.models.iter().map(ModelReportV1::from).collect(),
             impact: ImpactReportV1 {
                 dbt_models: &report.impact.dbt_models,
@@ -938,6 +1136,45 @@ mod tests {
             code: "incremental_history_not_recomputed".into(),
             message: "historical rows were not recomputed".into(),
         });
+        report.query_checks.push(QueryCheckReport {
+            name: "paid_orders_match".into(),
+            account: "primary".into(),
+            status: QueryCheckStatus::Findings,
+            current_refs: vec!["orders".into()],
+            production_refs: vec!["orders".into()],
+            primary_key: vec!["ID".into()],
+            candidate_relation: Some(r#""DB"."CI"."QUERY_C""#.into()),
+            production_relation: Some(r#""DB"."CI"."QUERY_P""#.into()),
+            candidate_row_count: Some(10),
+            production_row_count: Some(9),
+            columns: vec![QueryColumnComparison {
+                name: "ID".into(),
+                candidate_type: Some("NUMBER".into()),
+                production_type: Some("NUMBER".into()),
+            }],
+            comparison: Some(QueryComparison {
+                candidate_only_rows: 1,
+                production_only_rows: 0,
+                changed_rows: 0,
+                candidate_duplicate_keys: 0,
+                production_duplicate_keys: 0,
+                candidate_duplicate_rows: 0,
+                production_duplicate_rows: 0,
+                candidate_null_key_rows: 0,
+                production_null_key_rows: 0,
+                column_mismatches: vec![],
+                examples: vec![QueryDiffExample {
+                    key: vec![Some("10".into())],
+                    candidate: vec![Some("10".into())],
+                    production: vec![None],
+                    candidate_multiplicity: None,
+                    production_multiplicity: None,
+                }],
+            }),
+            reason: Some("1 candidate-only, 0 production-only, and 0 changed rows".into()),
+            invalid_primary_key_reason: None,
+            examples_truncated: false,
+        });
         report.finalize();
         report
     }
@@ -1017,6 +1254,29 @@ mod tests {
             ReportVersion::V2,
             include_str!("../schemas/report-v2.schema.json"),
         );
+        assert_matches_schema(
+            &report,
+            ReportVersion::V3,
+            include_str!("../schemas/report-v3.schema.json"),
+        );
+        let mut planned = report.clone();
+        planned.models[0].dbt_build = "planned".into();
+        planned.models[0].comparison = None;
+        assert_matches_schema(
+            &planned,
+            ReportVersion::V1,
+            include_str!("../schemas/report-v1.schema.json"),
+        );
+        assert_matches_schema(
+            &planned,
+            ReportVersion::V2,
+            include_str!("../schemas/report-v2.schema.json"),
+        );
+        assert_matches_schema(
+            &planned,
+            ReportVersion::V3,
+            include_str!("../schemas/report-v3.schema.json"),
+        );
 
         let v1: serde_json::Value =
             serde_json::from_str(&report.json(ReportVersion::V1).unwrap()).unwrap();
@@ -1027,6 +1287,18 @@ mod tests {
                 .get("ci_duplicate_rows")
                 .is_none()
         );
+        let v2: serde_json::Value =
+            serde_json::from_str(&report.json(ReportVersion::V2).unwrap()).unwrap();
+        assert!(v2.get("query_checks").is_none());
+        assert!(v2["summary"].get("query_checks_run").is_none());
+
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../schemas/report-v3.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let mut malformed: serde_json::Value =
+            serde_json::from_str(&report.json(ReportVersion::V3).unwrap()).unwrap();
+        malformed["models"][0]["unexpected"] = serde_json::json!(true);
+        assert!(validator.validate(&malformed).is_err());
     }
 
     #[test]

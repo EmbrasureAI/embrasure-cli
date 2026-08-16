@@ -54,8 +54,11 @@ Snowflake returns the comparison evidence used in the local report:
 - Row counts, null rates, cardinality, min/max values, averages, and percentiles
 - Counts of primary-key values found on only one side, duplicate rows, and null-key rows
 - Optional stably ordered primary-key and duplicate-key examples, up to `safety.primary_key_sample_limit`
+- Optional deterministic query-diff row values, bounded by `safety.primary_key_sample_limit`, `safety.max_columns_per_model`, and `safety.max_example_value_chars`
 
-Set `primary_key_sample_limit: 0` when key values must not appear in process memory or JSON output. Reports are written to stdout unless `--markdown <path>` is provided.
+Set `primary_key_sample_limit: 0` when key or query-diff example values must not appear in process memory or JSON output. Reports are written to stdout unless `--markdown <path>` is provided.
+
+Query checks accept a single read-only query expression, but syntax validation is not a side-effect sandbox for functions invoked by that query. Use a least-privilege Snowflake role that cannot call unsafe procedures, user-defined functions, or external integrations. Query materializations use a dedicated run-owned schema and follow the same ownership-checked cleanup path as model schemas.
 
 ## Credentials and local files
 

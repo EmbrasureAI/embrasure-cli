@@ -17,6 +17,7 @@ Local checks connect directly to Snowflake. They require no Embrasure account or
 - Shifts in row counts, null rates, cardinality, ranges, averages, and percentiles
 - Primary-key values that appear or disappear
 - Duplicate or null primary keys introduced by a branch
+- Exact differences between arbitrary candidate and production SQL results
 - Existing dbt test failures
 - Affected dbt models and exposures
 - Declared cross-account dependencies
@@ -86,7 +87,7 @@ embrasure check --dry-run
 embrasure check --dry-run --json
 ```
 
-Dry runs still resolve credentials and run local dbt parsing. `--dry-run` cannot be combined with `--cloud`.
+Dry runs use local dbt parsing but do not resolve credentials, create Snowflake schemas, or query warehouse data. `--dry-run` cannot be combined with `--cloud`.
 
 ## Reports and exit codes
 
@@ -98,7 +99,7 @@ embrasure check --json --markdown embrasure-check.md
 embrasure check --json --report-version 1
 ```
 
-Published contracts: [report v1](schemas/report-v1.schema.json) and [report v2](schemas/report-v2.schema.json).
+Published contracts: [report v1](schemas/report-v1.schema.json), [report v2](schemas/report-v2.schema.json), and [report v3](schemas/report-v3.schema.json). V3 is the default; v1 and v2 remain explicit compatibility projections.
 
 | Exit code | Meaning |
 |---:|---|
@@ -118,6 +119,26 @@ Request review only after exit 0.
 ```
 
 For a faster first pass on large tables, add `--mode quick`. Quick mode estimates cardinality and skips percentiles. Deep mode is the default. Primary-key integrity stays exact in both modes.
+
+### Arbitrary SQL checks
+
+Query-diff checks compare any two read-only query results exactly. `production_sql` defaults to `sql`, and each dbt `ref()` is rendered against the candidate or production-state manifest. Checks with no refs, or definitions changed since `--base`, run even when no model changed.
+
+```yaml
+checks:
+  - type: query_diff
+    name: paid order totals
+    sql: |
+      select customer_id, sum(amount) as paid_amount
+      from {{ ref('orders') }}
+      where status = 'paid'
+      group by customer_id
+    primary_key: [customer_id]
+```
+
+With a primary key, Embrasure reports added, removed, and changed rows plus per-column mismatch counts. Null or duplicate keys block the value join. Without a key, grouped rows and their multiplicities preserve duplicate-only differences. Query examples are bounded by the configured sample, column, and value limits.
+
+Only persisted dbt models are supported in `ref()`. Query checks accept one `SELECT`, `WITH`, or `VALUES` expression; other Jinja and multi-statement SQL are rejected. Removed checks are reported as incomplete coverage instead of silently passing.
 
 ## GitHub Actions
 
@@ -203,7 +224,7 @@ The validation role needs `SELECT` on the production source and `CREATE TABLE` i
 
 See the [example configuration](embrasure-check.example.yml) and [enterprise setup guide](docs/enterprise.md) for service credentials, multiple accounts, model policies, filters, thresholds, concurrency, external changes, cross-account dependencies, Metabase, and grants.
 
-Every temporary schema has a unique name and ownership marker. Embrasure checks both before removal and treats cleanup failures as execution failures. Use a dedicated role that can read and clone only the production tables under test and create temporary schemas in the required databases.
+Every temporary schema has a unique name and ownership marker. Query results are materialized in a dedicated run-owned schema so they cannot collide with dbt model aliases. Embrasure checks ownership before removal and treats cleanup failures as execution failures. Use a dedicated role that can read and clone only the production tables under test and create temporary schemas in the required databases. SQL validation is not a side-effect sandbox, so the role must not be able to call unsafe procedures, functions, or external integrations.
 
 [Security and data flow](docs/security-and-data-flow.md) documents network connections, local files, returned data, credentials, cleanup, updates, and release verification.
 
@@ -223,6 +244,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
 ```
 
-The opt-in Snowflake suite uses `EMBRASURE_RUN_SNOWFLAKE_TESTS=1` and the `EMBRASURE_TEST_SNOWFLAKE_*` account, user, role, database, warehouse, and token variables.
+The opt-in Snowflake suite uses `EMBRASURE_RUN_SNOWFLAKE_TESTS=1` and the `EMBRASURE_TEST_SNOWFLAKE_*` account, user, role, database, warehouse, and token variables. It covers exact keyed passes and changes, duplicate-only unkeyed differences, incremental cloning, cleanup, and 100,000 synthetic rows.
 
 Contributions are welcome under the [Apache 2.0 license](LICENSE).

@@ -15,6 +15,8 @@ safety:
   max_models: 25
   max_columns_per_model: 100
   primary_key_sample_limit: 20
+  max_query_checks: 20
+  max_example_value_chars: 512
 
 comparison:
   # quick estimates cardinality and skips percentiles.
@@ -78,6 +80,25 @@ models:
     # where: "order_date >= DATEADD(day, -30, CURRENT_DATE)"
     # Set this only for an intentional deletion after checking reported impact.
     # allow_removal: true
+
+# Optional exact comparisons for arbitrary read-only query results. production_sql
+# defaults to sql. ref()-free checks run on every invocation; checks with refs run
+# when any referenced model is impacted.
+checks:
+  - type: query_diff
+    name: paid order totals
+    sql: |
+      select customer_id, sum(amount) as paid_amount
+      from {{ ref('orders') }}
+      where status = 'paid'
+      group by customer_id
+    primary_key: [customer_id]
+    # account: primary # Required with multiple accounts.
+    # production_sql: |
+    #   select customer_id, sum(amount) as paid_amount
+    #   from {{ ref('legacy_orders') }}
+    #   where status = 'paid'
+    #   group by customer_id
 
 # Optional non-dbt changes that should invalidate dbt models.
 external_changes:
