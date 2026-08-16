@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::{
     auth::ResolvedAuth,
     config::{AccountConfig, Config},
+    git,
     report::{ImpactReport, ImpactedAsset, LineageChange, LineageChangeKind, LineageEdge},
 };
 
@@ -80,13 +81,13 @@ pub struct Exposure {
 
 #[derive(Debug)]
 pub struct DbtContext {
-    _scratch: TempDir,
+    scratch: TempDir,
     pub repo_root: PathBuf,
     pub profiles_dir: PathBuf,
     state_dirs: BTreeMap<String, PathBuf>,
     manifests: BTreeMap<String, Manifest>,
     production_manifests: BTreeMap<String, Manifest>,
-    base_worktree: Option<PathBuf>,
+    base_worktree: Option<WorktreeRegistration>,
 }
 
 #[derive(Debug)]
@@ -506,7 +507,7 @@ pub fn prepare(
             .collect::<BTreeMap<_, _>>()
     } else {
         let base_worktree = scratch.path().join("base-worktree");
-        run_git(
+        git::success(
             &repo_root,
             &[
                 "worktree",
@@ -586,19 +587,14 @@ pub fn prepare(
             Manifest::load(&state_dir.join("manifest.json"))?,
         );
     }
-    let base_worktree = worktree_registration.as_mut().map(|registration| {
-        registration.active = false;
-        registration.path.clone()
-    });
-
     Ok(DbtContext {
-        _scratch: scratch,
+        scratch,
         repo_root,
         profiles_dir,
         state_dirs,
         manifests,
         production_manifests,
-        base_worktree,
+        base_worktree: worktree_registration,
     })
 }
 
@@ -623,23 +619,23 @@ impl DbtContext {
     }
 
     fn build_target(&self, account: &str) -> PathBuf {
-        self._scratch.path().join("build-target").join(account)
+        self.scratch.path().join("build-target").join(account)
     }
 
     pub fn cleanup_worktree(&mut self) -> Result<()> {
-        let Some(path) = self.base_worktree.take() else {
+        let Some(mut registration) = self.base_worktree.take() else {
             return Ok(());
         };
-        run_git(
-            &self.repo_root,
-            &["worktree", "remove", "--force", path_str(&path)?],
-        )
+        remove_worktree(&registration.repo, &registration.path)?;
+        registration.active = false;
+        Ok(())
     }
 
     pub fn changed_paths(&self, base: &str) -> Result<Vec<String>> {
-        let output = git_output(&self.repo_root, &["diff", "--name-only", base])?;
+        // Local validation includes untracked files because dbt can select newly-created models.
+        let output = git::text(&self.repo_root, &["diff", "--name-only", base])?;
         let mut paths = output.lines().map(str::to_owned).collect::<Vec<_>>();
-        let untracked = git_output(
+        let untracked = git::text(
             &self.repo_root,
             &["ls-files", "--others", "--exclude-standard"],
         )?;
@@ -647,19 +643,6 @@ impl DbtContext {
         paths.sort();
         paths.dedup();
         Ok(paths)
-    }
-}
-
-impl Drop for DbtContext {
-    fn drop(&mut self) {
-        if let Some(path) = self.base_worktree.take() {
-            let _ = Command::new("git")
-                .arg("-C")
-                .arg(&self.repo_root)
-                .args(["worktree", "remove", "--force"])
-                .arg(path)
-                .output();
-        }
     }
 }
 
@@ -933,6 +916,7 @@ pub fn ci_schema_name(prefix: &str, repo: &Path) -> Result<String> {
     ))
 }
 
+#[derive(Debug)]
 struct WorktreeRegistration {
     repo: PathBuf,
     path: PathBuf,
@@ -942,14 +926,13 @@ struct WorktreeRegistration {
 impl Drop for WorktreeRegistration {
     fn drop(&mut self) {
         if self.active {
-            let _ = Command::new("git")
-                .arg("-C")
-                .arg(&self.repo)
-                .args(["worktree", "remove", "--force"])
-                .arg(&self.path)
-                .output();
+            let _ = remove_worktree(&self.repo, &self.path);
         }
     }
+}
+
+fn remove_worktree(repo: &Path, path: &Path) -> Result<()> {
+    git::success(repo, &["worktree", "remove", "--force", path_str(path)?])
 }
 
 fn write_profiles(
@@ -1033,16 +1016,7 @@ fn maybe_dbt_deps(config: &Config, project: &Path, profiles: &Path) -> Result<()
 }
 
 fn dbt_command(config: &Config, project: &Path, profiles: &Path, args: &[&str]) -> Result<()> {
-    let output = dbt_process(config, project, profiles, args)?;
-    if !output.status.success() {
-        bail!(
-            "dbt {} failed ({}): {}",
-            args.first().unwrap_or(&"command"),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+    dbt_output(config, project, profiles, args).map(|_| ())
 }
 
 fn dbt_output(config: &Config, project: &Path, profiles: &Path, args: &[&str]) -> Result<String> {
@@ -1074,38 +1048,8 @@ fn dbt_process(config: &Config, project: &Path, profiles: &Path, args: &[&str]) 
         .with_context(|| format!("could not run {}", config.dbt.command))
 }
 
-fn run_git(repo: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .context("could not run git")?;
-    if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.first().unwrap_or(&"command"),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
-}
-
 fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .context("could not run git")?;
-    if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.first().unwrap_or(&"command"),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    String::from_utf8(output.stdout).context("git returned non-UTF-8 output")
+    git::text(repo, args)
 }
 
 fn path_str(path: &Path) -> Result<&str> {

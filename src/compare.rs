@@ -92,7 +92,9 @@ pub async fn compare_model(
                 format!("column {name} exists in CI but not production"),
             ));
         } else if let (Some(ci_column), Some(prod_column)) = (ci_column, prod_column)
-            && !equivalent_type(&ci_column.data_type, &prod_column.data_type)
+            && !ci_column
+                .data_type
+                .eq_ignore_ascii_case(&prod_column.data_type)
         {
             findings.push(finding(
                 model_id,
@@ -572,10 +574,6 @@ fn is_orderable(data_type: &str) -> bool {
             .unwrap_or_default(),
         "ARRAY" | "OBJECT" | "VARIANT" | "BINARY" | "GEOGRAPHY" | "GEOMETRY"
     )
-}
-
-fn equivalent_type(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
 }
 
 fn relative_change(current: f64, production: f64) -> f64 {

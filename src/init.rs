@@ -19,16 +19,6 @@ pub struct Options {
     pub production_schema: Option<String>,
 }
 
-#[derive(Debug, Default)]
-struct Defaults {
-    profile: Option<String>,
-    account: Option<String>,
-    user: Option<String>,
-    role: Option<String>,
-    database: Option<String>,
-    warehouse: Option<String>,
-}
-
 #[derive(Serialize)]
 struct GeneratedConfig<'a> {
     version: u8,
@@ -158,15 +148,15 @@ fn required(label: &str, default: Option<String>) -> Result<String> {
     bail!("{label} is required");
 }
 
-fn discover_defaults(project_file: &Path) -> Defaults {
+fn discover_defaults(project_file: &Path) -> Options {
     let profile = fs::read(project_file)
         .ok()
         .and_then(|bytes| serde_yaml::from_slice::<Value>(&bytes).ok())
         .and_then(|value| mapping_string(&value, "profile"));
 
-    let mut defaults = Defaults {
+    let mut defaults = Options {
         profile,
-        ..Defaults::default()
+        ..Options::default()
     };
     let Some(profile_name) = defaults.profile.as_deref() else {
         return defaults;

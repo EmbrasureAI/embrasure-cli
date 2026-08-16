@@ -3,12 +3,23 @@ use std::{fmt::Write as _, fs, path::Path};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{CrossAccountDependency, DownstreamPolicy, Thresholds};
+use crate::{
+    config::{CrossAccountDependency, DownstreamPolicy, Thresholds},
+    style::Style,
+};
 
 pub const EXIT_PASS: u8 = 0;
 pub const EXIT_FINDINGS: u8 = 1;
 pub const EXIT_INCOMPLETE: u8 = 2;
 pub const EXIT_EXECUTION: u8 = 3;
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ReportVersion {
+    #[value(name = "1")]
+    V1,
+    #[value(name = "2")]
+    V2,
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -285,12 +296,17 @@ impl Report {
             .with_context(|| format!("could not write Markdown report {}", path.display()))
     }
 
+    #[cfg(test)]
     pub fn human(&self, verbose: bool) -> String {
+        self.human_styled(verbose, &Style::plain())
+    }
+
+    pub fn human_styled(&self, verbose: bool, style: &Style) -> String {
         let label = match self.status {
-            Status::Pass => "PASS",
-            Status::Findings => "FINDINGS",
-            Status::Incomplete => "INCOMPLETE",
-            Status::ExecutionFailure => "EXECUTION FAILURE",
+            Status::Pass => style.good("PASS"),
+            Status::Findings => style.bad("FINDINGS"),
+            Status::Incomplete => style.warn("INCOMPLETE"),
+            Status::ExecutionFailure => style.bad("EXECUTION FAILURE"),
         };
         let mut output = format!(
             "embrasure: {label}\n{} selected · {} built · {} compared · {} findings · {} coverage gaps\n{} impacted · {} validated · {} not validated\n",
@@ -338,16 +354,18 @@ impl Report {
                 );
             }
         }
-        for model in self.models.iter().filter(|_| verbose) {
-            if let Some(comparison) = &model.comparison {
-                let _ = writeln!(
-                    output,
-                    "- [evidence] {}: {} CI rows vs {} production rows across {} columns",
-                    model.unique_id,
-                    comparison.ci_row_count,
-                    comparison.production_row_count,
-                    comparison.columns.len(),
-                );
+        if verbose {
+            for model in &self.models {
+                if let Some(comparison) = &model.comparison {
+                    let _ = writeln!(
+                        output,
+                        "- [evidence] {}: {} CI rows vs {} production rows across {} columns",
+                        model.unique_id,
+                        comparison.ci_row_count,
+                        comparison.production_row_count,
+                        comparison.columns.len(),
+                    );
+                }
             }
         }
         self.write_human_lineage(&mut output, verbose);
@@ -378,11 +396,15 @@ impl Report {
         output
     }
 
-    pub fn json(&self, version: u8) -> serde_json::Result<String> {
+    pub fn json_value(&self, version: ReportVersion) -> serde_json::Result<serde_json::Value> {
         match version {
-            1 => serde_json::to_string_pretty(&ReportV1::from(self)),
-            _ => serde_json::to_string_pretty(self),
+            ReportVersion::V1 => serde_json::to_value(ReportV1::from(self)),
+            ReportVersion::V2 => serde_json::to_value(self),
         }
+    }
+
+    pub fn json(&self, version: ReportVersion) -> serde_json::Result<String> {
+        serde_json::to_string_pretty(&self.json_value(version)?)
     }
 
     pub fn markdown(&self) -> String {
@@ -920,13 +942,13 @@ mod tests {
         report
     }
 
-    fn assert_matches_schema(report: &Report, version: u8, schema: &str) {
+    fn assert_matches_schema(report: &Report, version: ReportVersion, schema: &str) {
         let schema: serde_json::Value = serde_json::from_str(schema).unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();
         let instance: serde_json::Value =
             serde_json::from_str(&report.json(version).unwrap()).unwrap();
         if let Err(error) = validator.validate(&instance) {
-            panic!("report v{version} violates its schema: {error}");
+            panic!("report violates its schema: {error}");
         }
     }
 
@@ -985,10 +1007,19 @@ mod tests {
     #[test]
     fn reports_match_their_published_json_schemas() {
         let report = representative_report();
-        assert_matches_schema(&report, 1, include_str!("../schemas/report-v1.schema.json"));
-        assert_matches_schema(&report, 2, include_str!("../schemas/report-v2.schema.json"));
+        assert_matches_schema(
+            &report,
+            ReportVersion::V1,
+            include_str!("../schemas/report-v1.schema.json"),
+        );
+        assert_matches_schema(
+            &report,
+            ReportVersion::V2,
+            include_str!("../schemas/report-v2.schema.json"),
+        );
 
-        let v1: serde_json::Value = serde_json::from_str(&report.json(1).unwrap()).unwrap();
+        let v1: serde_json::Value =
+            serde_json::from_str(&report.json(ReportVersion::V1).unwrap()).unwrap();
         assert!(v1.get("validation_scope").is_none());
         assert!(v1["models"][0].get("build_strategy").is_none());
         assert!(

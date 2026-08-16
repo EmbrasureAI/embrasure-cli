@@ -21,6 +21,7 @@ use crate::{
     snowflake::{Relation, SnowflakeClient, is_managed_schema},
 };
 
+#[cfg(test)]
 pub async fn run_check(config_path: &Path, base: &str, options: CheckOptions) -> Report {
     if base.trim().is_empty() || base.starts_with('-') {
         return error_report(
@@ -28,36 +29,58 @@ pub async fn run_check(config_path: &Path, base: &str, options: CheckOptions) ->
             anyhow::anyhow!("--base must be a non-empty Git revision and must not start with '-'"),
         );
     }
-    let mut config = match Config::load(config_path) {
+    let config = match load_config(config_path, &options) {
         Ok(config) => config,
         Err(error) => return error_report(base, error),
     };
+    run_check_with_config(config, base, &options, false).await
+}
+
+pub fn load_config(config_path: &Path, options: &CheckOptions) -> Result<Config> {
+    let mut config = Config::load(config_path)?;
     if let Some(mode) = options.mode {
         config.comparison.mode = mode;
     }
     if let Some(downstream) = options.downstream {
         config.validation.downstream = downstream;
     }
-    if let Some(tags) = options.critical_tags {
+    if let Some(tags) = &options.critical_tags {
         if tags.iter().any(|tag| tag.trim().is_empty()) {
-            return error_report(base, anyhow::anyhow!("--critical-tag must not be empty"));
+            bail!("--critical-tag must not be empty");
         }
-        config.validation.critical_tags = tags;
+        config.validation.critical_tags = tags.clone();
     }
     if let Some(mode) = options.incremental_mode {
         config.validation.incremental_mode = mode;
     }
-    if let Err(error) = config.resolve_from(config_path) {
-        return error_report(base, error);
+    config.resolve_from(config_path)?;
+    Ok(config)
+}
+
+pub async fn run_check_with_config(
+    config: Config,
+    base: &str,
+    options: &CheckOptions,
+    dry_run: bool,
+) -> Report {
+    if base.trim().is_empty() || base.starts_with('-') {
+        return error_report(
+            base,
+            anyhow::anyhow!("--base must be a non-empty Git revision and must not start with '-'"),
+        );
     }
     let mut report = Report::empty(base.to_owned(), config.thresholds);
     report.validation_scope.downstream = config.validation.downstream;
-    let run_result = execute(&config, base, &mut report).await;
+    let run_result = execute(&config, base, options, dry_run, &mut report).await;
     if let Err(error) = run_result {
-        report.execution_errors.push(format_error(&error));
+        report.execution_errors.push(format!("{error:#}"));
     }
     report.finalize();
     report
+}
+
+pub fn failed_check(base: &str, error: anyhow::Error) -> Report {
+    error_report(base, error)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -66,9 +89,16 @@ pub struct CheckOptions {
     pub downstream: Option<DownstreamPolicy>,
     pub critical_tags: Option<Vec<String>>,
     pub incremental_mode: Option<IncrementalMode>,
+    pub select: Vec<String>,
 }
 
-async fn execute(config: &Config, base: &str, report: &mut Report) -> Result<()> {
+async fn execute(
+    config: &Config,
+    base: &str,
+    options: &CheckOptions,
+    dry_run: bool,
+    report: &mut Report,
+) -> Result<()> {
     let resolved_auth = auth::resolve_all(config)
         .await
         .context("could not resolve Snowflake credentials")?;
@@ -78,39 +108,52 @@ async fn execute(config: &Config, base: &str, report: &mut Report) -> Result<()>
 
     let main_result = {
         let main = async {
-            for account in &config.accounts {
-                let client = SnowflakeClient::new(
-                    account,
-                    resolved_auth
-                        .get(&account.name)
-                        .context("resolved Snowflake credential was not retained")?,
-                    query_tag.clone(),
-                    config.safety.statement_timeout_seconds,
-                )
-                .with_context(|| {
-                    format!("could not initialize Snowflake account {}", account.name)
-                })?;
-                clients.push(client);
-            }
-
-            let mut context = dbt::prepare(config, &resolved_auth, base, &schema, &query_tag)?;
-            let selections = plan_selections(config, &context, report)?;
-            let result = if let Some(selections) = selections {
-                for (index, account) in config.accounts.iter().enumerate() {
+            if !dry_run {
+                for account in &config.accounts {
+                    let client = SnowflakeClient::new(
+                        account,
+                        resolved_auth
+                            .get(&account.name)
+                            .context("resolved Snowflake credential was not retained")?,
+                        query_tag.clone(),
+                        config.safety.statement_timeout_seconds,
+                    )
+                    .with_context(|| {
+                        format!("could not initialize Snowflake account {}", account.name)
+                    })?;
                     report.ci_schemas.push(CiSchema {
                         account: account.name.clone(),
                         database: account.database.clone(),
                         schema: schema.clone(),
                         cleaned_up: false,
                     });
-                    clients[index]
+                    client
                         .create_schema(&account.database, &schema)
                         .await
                         .with_context(|| {
                             format!("could not create CI schema for account {}", account.name)
                         })?;
+                    clients.push(client);
                 }
-                execute_with_dbt(config, &mut context, &clients, &schema, &selections, report).await
+            }
+
+            let mut context = dbt::prepare(config, &resolved_auth, base, &schema, &query_tag)?;
+            let selections = plan_selections(config, &context, options, report)?;
+            let result = if let Some(selections) = selections {
+                if dry_run {
+                    plan_model_reports(config, &context, &selections, "planned", report)?;
+                    report.notices.push(Notice {
+                        scope: "validation".into(),
+                        code: "dry_run".into(),
+                        message:
+                            "planned validation without creating schemas or querying warehouse data"
+                                .into(),
+                    });
+                    Ok(())
+                } else {
+                    execute_with_dbt(config, &mut context, &clients, &schema, &selections, report)
+                        .await
+                }
             } else {
                 Ok(())
             };
@@ -132,7 +175,7 @@ async fn execute(config: &Config, base: &str, report: &mut Report) -> Result<()>
     };
 
     if let Err(error) = main_result {
-        report.execution_errors.push(format_error(&error));
+        report.execution_errors.push(format!("{error:#}"));
     }
     cleanup_schemas(config, &clients, &schema, report).await;
     Ok(())
@@ -144,9 +187,52 @@ struct AccountSelection {
     removed: BTreeSet<String>,
 }
 
+fn resolve_selected_models(
+    config: &Config,
+    context: &DbtContext,
+    requested: &[String],
+) -> Result<Vec<BTreeSet<String>>> {
+    let mut chosen = vec![BTreeSet::new(); config.accounts.len()];
+    for value in requested {
+        let mut matches = Vec::new();
+        for (index, account) in config.accounts.iter().enumerate() {
+            let manifest = context.manifest(&account.name)?;
+            if let Some(id) = manifest.node_id(value) {
+                if manifest
+                    .nodes
+                    .get(&id)
+                    .is_some_and(|node| node.resource_type == "model")
+                {
+                    matches.push((index, id));
+                }
+            } else if manifest
+                .nodes
+                .values()
+                .filter(|node| node.resource_type == "model" && node.name == *value)
+                .count()
+                > 1
+            {
+                bail!(
+                    "--select model {value} is ambiguous in account {}",
+                    account.name
+                );
+            }
+        }
+        match matches.as_slice() {
+            [] => bail!("--select model {value} is unknown"),
+            [(index, id)] => {
+                chosen[*index].insert(id.clone());
+            }
+            _ => bail!("--select model {value} is ambiguous across configured accounts"),
+        }
+    }
+    Ok(chosen)
+}
+
 fn plan_selections(
     config: &Config,
     context: &DbtContext,
+    options: &CheckOptions,
     report: &mut Report,
 ) -> Result<Option<Vec<AccountSelection>>> {
     let changed_paths = context.changed_paths(&report.base)?;
@@ -158,7 +244,8 @@ fn plan_selections(
         .collect::<BTreeSet<_>>();
     let mut selections = Vec::new();
     let mut selected_count = 0;
-    for account in &config.accounts {
+    let chosen = resolve_selected_models(config, context, &options.select)?;
+    for (account_index, account) in config.accounts.iter().enumerate() {
         let manifest = context.manifest(&account.name)?;
         let production = context.production_manifest(&account.name)?;
         report
@@ -209,7 +296,7 @@ fn plan_selections(
             })
             .map(|node| node.unique_id.clone())
             .collect::<BTreeSet<_>>();
-        let selected = match config.validation.downstream {
+        let mut selected = match config.validation.downstream {
             DownstreamPolicy::None => changed.clone(),
             DownstreamPolicy::All => current_impacted
                 .union(&surviving_removed_impact)
@@ -236,6 +323,22 @@ fn plan_selections(
                 selected
             }
         };
+        if !options.select.is_empty() {
+            for id in &chosen[account_index] {
+                if !selected.contains(id) {
+                    bail!(
+                        "--select model {id} is not changed or is outside the requested downstream scope"
+                    );
+                }
+            }
+            for id in selected.difference(&chosen[account_index]) {
+                report.validation_scope.skipped_models.push(SkippedModel {
+                    id: format!("{}:{id}", account.name),
+                    reason: "excluded by --select".into(),
+                });
+            }
+            selected.retain(|id| chosen[account_index].contains(id));
+        }
         let impacted = current_impacted
             .union(&removed_impacted)
             .cloned()
@@ -302,6 +405,73 @@ async fn termination_signal() -> Result<()> {
     Ok(())
 }
 
+fn plan_model_reports(
+    config: &Config,
+    context: &DbtContext,
+    selections: &[AccountSelection],
+    dbt_build: &str,
+    report: &mut Report,
+) -> Result<Vec<(String, Relation)>> {
+    let mut production_relations = Vec::new();
+    for (account, selection) in config.accounts.iter().zip(selections) {
+        let manifest = context.manifest(&account.name)?;
+        let production = context.production_manifest(&account.name)?;
+        for id in &selection.removed {
+            let node = &production.nodes[id];
+            production_relations.push((
+                id.clone(),
+                relation_for(node, &account.database, &node.schema),
+            ));
+            if !model_config(config, id, &node.name).allow_removal {
+                report.findings.push(Finding {
+                    check: "model_removed".into(),
+                    model: id.clone(),
+                    message: "dbt model exists at the base revision but is absent from the current manifest; set models.<unique_id>.allow_removal only after confirming the deletion and downstream migration".into(),
+                });
+            }
+        }
+        for id in &selection.selected {
+            let node = manifest.nodes.get(id).with_context(|| {
+                format!("selected dbt model {id} is absent from current manifest")
+            })?;
+            let ci_relation = relation_for(node, &account.database, &node.schema);
+            let production_relation = production
+                .nodes
+                .get(id)
+                .map(|production| relation_for(production, &account.database, &production.schema));
+            production_relations.push((
+                id.clone(),
+                production_relation.clone().unwrap_or_else(|| {
+                    relation_for(node, &account.database, &account.production_schema)
+                }),
+            ));
+            let build_strategy = if manifest.is_incremental(id) {
+                if production_relation.is_none() {
+                    "first_build"
+                } else {
+                    match config.validation.incremental_mode {
+                        IncrementalMode::Clone => "incremental_clone",
+                        IncrementalMode::FullRefresh => "full_refresh",
+                    }
+                }
+            } else {
+                "standard"
+            };
+            report.models.push(ModelReport {
+                unique_id: id.clone(),
+                name: node.name.clone(),
+                account: account.name.clone(),
+                ci_relation: ci_relation.sql(),
+                production_relation: production_relation.as_ref().map(Relation::sql),
+                dbt_build: dbt_build.into(),
+                build_strategy: build_strategy.into(),
+                comparison: None,
+            });
+        }
+    }
+    Ok(production_relations)
+}
+
 async fn execute_with_dbt(
     config: &Config,
     context: &mut DbtContext,
@@ -310,26 +480,12 @@ async fn execute_with_dbt(
     selections: &[AccountSelection],
     report: &mut Report,
 ) -> Result<()> {
+    let removed_production_relations =
+        plan_model_reports(config, context, selections, "pending", report)?;
     let mut all_selected = BTreeSet::new();
-    let mut removed_production_relations = Vec::new();
-    for (account, selection) in config.accounts.iter().zip(selections) {
-        let production_manifest = context.production_manifest(&account.name)?;
+    for selection in selections {
         all_selected.extend(selection.removed.iter().cloned());
         all_selected.extend(selection.selected.iter().cloned());
-        for model in &selection.removed {
-            let production_node = &production_manifest.nodes[model];
-            removed_production_relations.push((
-                model.clone(),
-                relation_for(production_node, &account.database, &production_node.schema),
-            ));
-            if !model_config(config, model, &production_node.name).allow_removal {
-                report.findings.push(Finding {
-                    check: "model_removed".into(),
-                    model: model.clone(),
-                    message: "dbt model exists at the base revision but is absent from the current manifest; set models.<unique_id>.allow_removal only after confirming the deletion and downstream migration".into(),
-                });
-            }
-        }
     }
 
     for (index, selection) in selections.iter().enumerate() {
@@ -479,51 +635,12 @@ async fn execute_with_dbt(
             });
         }
     }
-    let mut production_relations = removed_production_relations;
+    let production_relations = removed_production_relations;
     let mut comparison_jobs = Vec::new();
     for (index, (account, selection)) in config.accounts.iter().zip(selections).enumerate() {
         let selected = &selection.selected;
         let manifest = context.manifest(&account.name)?;
         let production_manifest = context.production_manifest(&account.name)?;
-        for id in selected {
-            let node = manifest.nodes.get(id).with_context(|| {
-                format!("selected dbt model {id} is absent from current manifest")
-            })?;
-            let ci_relation = relation_for(node, &account.database, &node.schema);
-            let production_relation = production_manifest
-                .nodes
-                .get(id)
-                .map(|production| relation_for(production, &account.database, &production.schema));
-            production_relations.push((
-                id.clone(),
-                production_relation.clone().unwrap_or_else(|| {
-                    relation_for(node, &account.database, &account.production_schema)
-                }),
-            ));
-            let build_strategy = if manifest.is_incremental(id) {
-                if production_relation.is_none() {
-                    "first_build"
-                } else {
-                    match config.validation.incremental_mode {
-                        IncrementalMode::Clone => "incremental_clone",
-                        IncrementalMode::FullRefresh => "full_refresh",
-                    }
-                }
-            } else {
-                "standard"
-            };
-            report.models.push(ModelReport {
-                unique_id: id.clone(),
-                name: node.name.clone(),
-                account: account.name.clone(),
-                ci_relation: ci_relation.sql(),
-                production_relation: production_relation.as_ref().map(Relation::sql),
-                dbt_build: "pending".into(),
-                build_strategy: build_strategy.into(),
-                comparison: None,
-            });
-        }
-
         let build = dbt::build_models(
             config,
             context,
@@ -631,7 +748,7 @@ async fn execute_with_dbt(
                 }
                 report.findings.extend(findings);
             }
-            Err(error) => report.execution_errors.push(format_error(&error)),
+            Err(error) => report.execution_errors.push(format!("{error:#}")),
         }
     }
 
@@ -768,7 +885,7 @@ async fn cleanup_schemas(
                 }
             }
             Err(error) => report.execution_errors.push(format!(
-                "CI schema cleanup failed for {}.{}; remove it manually: {error:#}",
+                "CI schema cleanup failed for {}.{}; run `embrasure clean` or remove it manually: {error:#}",
                 database, target_schema,
             )),
         }
@@ -829,13 +946,9 @@ fn find_model_mut<'a>(
 
 fn error_report(base: &str, error: anyhow::Error) -> Report {
     let mut report = Report::empty(base.to_owned(), crate::config::Thresholds::default());
-    report.execution_errors.push(format_error(&error));
+    report.execution_errors.push(format!("{error:#}"));
     report.finalize();
     report
-}
-
-fn format_error(error: &anyhow::Error) -> String {
-    format!("{error:#}")
 }
 
 #[cfg(test)]

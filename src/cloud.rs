@@ -1,8 +1,7 @@
 use std::{
     env, fs,
-    io::{IsTerminal, Write},
+    io::Write,
     path::{Component, Path, PathBuf},
-    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -12,23 +11,17 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
 use keyring::Entry;
-use rand::{Rng, distributions::Alphanumeric};
-use reqwest::{Client, StatusCode};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    time::timeout,
-};
+use tokio::net::TcpListener;
 use url::Url;
 
-use crate::{config::Config, report::Report, run::CheckOptions};
+use crate::{config::Config, git, loopback, report::Report, run::CheckOptions, style, update};
 
 const KEYCHAIN_SERVICE: &str = "ai.embrasure.cli.cloud";
 const KEYCHAIN_ACCOUNT: &str = "session";
@@ -41,8 +34,6 @@ pub struct CloudSession {
     access_token: String,
     refresh_token: String,
     expires_at: String,
-    refresh_expires_at: String,
-    session_id: String,
     pub workspace_id: String,
     api_base_url: String,
 }
@@ -52,8 +43,6 @@ struct TokenResponse {
     access_token: String,
     refresh_token: String,
     expires_at: String,
-    refresh_expires_at: String,
-    session_id: String,
     workspace_id: String,
 }
 
@@ -112,7 +101,7 @@ pub struct Progress {
 
 impl Progress {
     pub fn start(label: &str) -> Self {
-        if !animation_enabled() {
+        if !style::animation_enabled() {
             eprintln!("{label}...");
             return Self {
                 stop: Arc::new(AtomicBool::new(true)),
@@ -150,10 +139,6 @@ impl Drop for Progress {
     }
 }
 
-pub fn animation_enabled() -> bool {
-    std::io::stderr().is_terminal() && env::var_os("NO_COLOR").is_none()
-}
-
 pub fn normalize_context(values: &[String], file: Option<&Path>) -> Result<String> {
     let mut parts = values
         .iter()
@@ -183,6 +168,7 @@ pub fn normalize_context(values: &[String], file: Option<&Path>) -> Result<Strin
 
 pub fn prepare_snapshot(
     config_path: &Path,
+    config: &Config,
     base_ref: &str,
     options: &CheckOptions,
 ) -> Result<PreparedSnapshot> {
@@ -190,8 +176,6 @@ pub fn prepare_snapshot(
         config_path.parent().unwrap_or_else(|| Path::new(".")),
         &["rev-parse", "--show-toplevel"],
     )?;
-    let mut config = Config::load(config_path)?;
-    config.resolve_from(config_path)?;
     let dbt_dir = config.dbt.project_dir.canonicalize().with_context(|| {
         format!(
             "could not resolve dbt project directory {}",
@@ -205,9 +189,9 @@ pub fn prepare_snapshot(
         .replace('\\', "/")
         .trim_matches('/')
         .to_owned();
-    let base_sha = git_text(&repository_root, &["rev-parse", "--verify", base_ref])?;
-    let head_sha = git_text(&repository_root, &["rev-parse", "--verify", "HEAD"]).ok();
-    let remote = git_text(&repository_root, &["remote", "get-url", "origin"])?;
+    let base_sha = git::text(&repository_root, &["rev-parse", "--verify", base_ref])?;
+    let head_sha = git::text(&repository_root, &["rev-parse", "--verify", "HEAD"]).ok();
+    let remote = git::text(&repository_root, &["remote", "get-url", "origin"])?;
     let (owner, name) = parse_github_remote(&remote)?;
     let mut candidates = changed_paths(&repository_root, base_ref)?;
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
@@ -350,7 +334,23 @@ pub async fn handoff(
     intent: &str,
 ) -> Result<HandoffReceipt> {
     let mut session = valid_session().await?;
-    let payload = json!({
+    let payload = handoff_payload(snapshot, report, base_ref, intent);
+    let mut response = send_handoff(&session, &payload).await?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        session = refresh_session(&session).await?;
+        save_session(&session)?;
+        response = send_handoff(&session, &payload).await?;
+    }
+    parse_handoff(response, snapshot).await
+}
+
+fn handoff_payload(
+    snapshot: &PreparedSnapshot,
+    report: &Report,
+    base_ref: &str,
+    intent: &str,
+) -> Value {
+    json!({
         "idempotency_key": format!("cli:{}", snapshot.fingerprint),
         "repository": {
             "provider": "github",
@@ -367,8 +367,11 @@ pub async fn handoff(
         "local_review": report,
         "cli": {"version": env!("CARGO_PKG_VERSION"), "platform": env::consts::OS},
         "notify_slack": true,
-    });
-    let response = Client::new()
+    })
+}
+
+async fn send_handoff(session: &CloudSession, payload: &Value) -> Result<reqwest::Response> {
+    update::http_client()?
         .post(format!(
             "{}/v1/agent/cloud-handoffs",
             session.api_base_url.trim_end_matches('/')
@@ -377,42 +380,7 @@ pub async fn handoff(
         .json(&payload)
         .send()
         .await
-        .context("could not reach Embrasure Cloud")?;
-    if response.status() == StatusCode::UNAUTHORIZED {
-        session = refresh_session(&session).await?;
-        save_session(&session)?;
-        return handoff_once(snapshot, report, base_ref, intent, &session).await;
-    }
-    parse_handoff(response, snapshot).await
-}
-
-async fn handoff_once(
-    snapshot: &PreparedSnapshot,
-    report: &Report,
-    base_ref: &str,
-    intent: &str,
-    session: &CloudSession,
-) -> Result<HandoffReceipt> {
-    let payload = json!({
-        "idempotency_key": format!("cli:{}", snapshot.fingerprint),
-        "repository": {"provider":"github","owner":snapshot.owner,"name":snapshot.name,"dbt_root":snapshot.dbt_root,"base_ref":base_ref,"base_sha":snapshot.base_sha,"head_sha":snapshot.head_sha},
-        "snapshot_hash": snapshot.snapshot_hash,
-        "intent_context": intent,
-        "changed_files": snapshot.files,
-        "local_review": report,
-        "cli": {"version": env!("CARGO_PKG_VERSION"), "platform": env::consts::OS},
-        "notify_slack": true,
-    });
-    let response = Client::new()
-        .post(format!(
-            "{}/v1/agent/cloud-handoffs",
-            session.api_base_url.trim_end_matches('/')
-        ))
-        .bearer_auth(&session.access_token)
-        .json(&payload)
-        .send()
-        .await?;
-    parse_handoff(response, snapshot).await
+        .context("could not reach Embrasure Cloud")
 }
 
 async fn parse_handoff(
@@ -449,9 +417,8 @@ pub async fn login() -> Result<CloudSession> {
         .context("could not start the cloud login callback")?;
     let port = listener.local_addr()?.port();
     let return_url = format!("http://127.0.0.1:{port}/callback");
-    let state = random_string(32);
-    let verifier = random_string(64);
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let state = loopback::random_string(32);
+    let (verifier, challenge) = loopback::pkce_pair();
     let mut url = Url::parse(&format!(
         "{}/cli-auth/complete",
         web_base_url.trim_end_matches('/')
@@ -462,7 +429,10 @@ pub async fn login() -> Result<CloudSession> {
         .append_pair("return_url", &return_url)
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256")
-        .append_pair("device_id", &format!("rust-cli-{}", random_string(24)))
+        .append_pair(
+            "device_id",
+            &format!("rust-cli-{}", loopback::random_string(24)),
+        )
         .append_pair("device_name", "Embrasure CLI")
         .append_pair("platform", env::consts::OS)
         .append_pair("client", "cli")
@@ -472,12 +442,13 @@ pub async fn login() -> Result<CloudSession> {
         url.as_str()
     );
     let _ = webbrowser::open(url.as_str());
-    let (mut stream, _) = timeout(Duration::from_secs(180), listener.accept())
-        .await
-        .context("cloud login timed out after 3 minutes")??;
-    let request = timeout(Duration::from_secs(10), read_http_request(&mut stream))
-        .await
-        .context("cloud login callback timed out")??;
+    let (mut stream, request) = loopback::accept(
+        &listener,
+        Duration::from_secs(180),
+        "cloud login timed out after 3 minutes",
+        "cloud login callback timed out",
+    )
+    .await?;
     let request = String::from_utf8_lossy(&request);
     let target = request
         .lines()
@@ -496,21 +467,23 @@ pub async fn login() -> Result<CloudSession> {
         .map(|(_, value)| value.into_owned())
         .unwrap_or_default();
     if callback.path() != "/callback" || callback_state != state || code.is_empty() {
-        write_http_response(
+        loopback::respond(
             &mut stream,
+            "400 Bad Request",
             "Cloud sign-in failed",
             "Return to the terminal and try again.",
         )
         .await?;
         bail!("cloud login returned an invalid callback");
     }
-    write_http_response(
+    loopback::respond(
         &mut stream,
+        "200 OK",
         "Embrasure Cloud is connected",
         "You can close this tab and return to your terminal.",
     )
     .await?;
-    let response = Client::new()
+    let response = update::http_client()?
         .post(format!("{}/v1/auth/session/token", api_base_url.trim_end_matches('/')))
         .json(&json!({"grant_type":"authorization_code","code":code,"code_verifier":verifier,"redirect_uri":return_url}))
         .send().await.context("could not exchange the cloud authorization code")?;
@@ -525,8 +498,6 @@ pub async fn login() -> Result<CloudSession> {
         access_token: token.access_token,
         refresh_token: token.refresh_token,
         expires_at: token.expires_at,
-        refresh_expires_at: token.refresh_expires_at,
-        session_id: token.session_id,
         workspace_id: token.workspace_id,
         api_base_url,
     };
@@ -555,22 +526,38 @@ pub async fn status(run_id: Option<&str>) -> Result<Value> {
 
 pub async fn logout() -> Result<()> {
     if let Ok(session) = load_session() {
-        let _ = Client::new()
-            .post(format!(
-                "{}/v1/auth/session/revoke",
-                session.api_base_url.trim_end_matches('/')
-            ))
-            .json(&json!({"refresh_token": session.refresh_token}))
-            .send()
-            .await;
+        if let Ok(client) = update::http_client() {
+            let _ = client
+                .post(format!(
+                    "{}/v1/auth/session/revoke",
+                    session.api_base_url.trim_end_matches('/')
+                ))
+                .json(&json!({"refresh_token": session.refresh_token}))
+                .send()
+                .await;
+        }
     }
     match keychain()?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(error).context("could not remove the Embrasure Cloud keychain session"),
+        Err(error) => Err(keyring_error(
+            error,
+            "could not remove the Embrasure Cloud keychain session",
+        )),
     }
 }
 
 async fn valid_session() -> Result<CloudSession> {
+    if let Ok(access_token) = env::var("EMBRASURE_CLOUD_TOKEN")
+        && !access_token.trim().is_empty()
+    {
+        return Ok(CloudSession {
+            access_token,
+            refresh_token: String::new(),
+            expires_at: "9999-12-31T23:59:59Z".into(),
+            workspace_id: env::var("EMBRASURE_CLOUD_WORKSPACE_ID").unwrap_or_default(),
+            api_base_url: api_base_url(),
+        });
+    }
     let session =
         load_session().context("not signed in to Embrasure Cloud; run `embrasure cloud login`")?;
     let expires = DateTime::parse_from_rfc3339(&session.expires_at)?.with_timezone(&Utc);
@@ -583,7 +570,7 @@ async fn valid_session() -> Result<CloudSession> {
 }
 
 async fn refresh_session(session: &CloudSession) -> Result<CloudSession> {
-    let response = Client::new()
+    let response = update::http_client()?
         .post(format!(
             "{}/v1/auth/session/refresh",
             session.api_base_url.trim_end_matches('/')
@@ -604,15 +591,13 @@ async fn refresh_session(session: &CloudSession) -> Result<CloudSession> {
         access_token: token.access_token,
         refresh_token: token.refresh_token,
         expires_at: token.expires_at,
-        refresh_expires_at: token.refresh_expires_at,
-        session_id: token.session_id,
         workspace_id: token.workspace_id,
         api_base_url: session.api_base_url.clone(),
     })
 }
 
 async fn api_get(session: &CloudSession, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-    let response = Client::new()
+    let response = update::http_client()?
         .get(format!(
             "{}{}",
             session.api_base_url.trim_end_matches('/'),
@@ -635,20 +620,34 @@ async fn api_get(session: &CloudSession, path: &str, query: &[(&str, &str)]) -> 
 
 fn keychain() -> Result<Entry> {
     Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .context("could not open the Embrasure Cloud keychain entry")
+        .map_err(|error| keyring_error(error, "could not open the Embrasure Cloud keychain entry"))
 }
 
 fn save_session(session: &CloudSession) -> Result<()> {
     keychain()?
         .set_password(&serde_json::to_string(session)?)
-        .context("could not save the Embrasure Cloud session in the OS keychain")
+        .map_err(|error| {
+            keyring_error(
+                error,
+                "could not save the Embrasure Cloud session in the OS keychain",
+            )
+        })
 }
 
 fn load_session() -> Result<CloudSession> {
     let value = keychain()?
         .get_password()
-        .context("no Embrasure Cloud session is stored")?;
+        .map_err(|error| keyring_error(error, "no Embrasure Cloud session is stored"))?;
     serde_json::from_str(&value).context("the Embrasure Cloud keychain session is invalid")
+}
+
+fn keyring_error(error: keyring::Error, context: &str) -> anyhow::Error {
+    match error {
+        keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_) => anyhow::anyhow!(
+            "{context}: secure storage is unavailable; on headless Linux, start and unlock Secret Service or set EMBRASURE_CLOUD_TOKEN and optional EMBRASURE_CLOUD_WORKSPACE_ID"
+        ),
+        other => anyhow::Error::new(other).context(context.to_owned()),
+    }
 }
 
 fn api_base_url() -> String {
@@ -714,30 +713,13 @@ fn cache_is_fresh(saved_at: &str) -> bool {
 }
 
 fn git_path(cwd: &Path, args: &[&str]) -> Result<PathBuf> {
-    Ok(PathBuf::from(git_text(cwd, args)?).canonicalize()?)
-}
-
-fn git_text(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .with_context(|| format!("could not run git {}", args.join(" ")))?;
-    if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    Ok(PathBuf::from(git::text(cwd, args)?).canonicalize()?)
 }
 
 fn changed_paths(root: &Path, base: &str) -> Result<Vec<(String, String)>> {
-    let output = Command::new("git")
-        .current_dir(root)
-        .args(["diff", "--name-status", "-z", base, "--"])
-        .output()?;
+    // Cloud snapshots intentionally follow tracked Git diff output only.
+    // Follow-up: decide whether cloud handoffs should include untracked files.
+    let output = git::output(root, &["diff", "--name-status", "-z", base, "--"])?;
     if !output.status.success() {
         bail!(
             "could not inspect working-tree changes: {}",
@@ -775,20 +757,6 @@ fn changed_paths(root: &Path, base: &str) -> Result<Vec<(String, String)>> {
         } else {
             2
         };
-    }
-    let untracked = Command::new("git")
-        .current_dir(root)
-        .args(["ls-files", "--others", "--exclude-standard", "-z"])
-        .output()?;
-    if !untracked.status.success() {
-        bail!("could not inspect untracked files");
-    }
-    for path in untracked
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-    {
-        rows.push((String::from_utf8(path.to_vec())?, "added".into()));
     }
     Ok(rows)
 }
@@ -887,14 +855,6 @@ fn encode_hex(bytes: &[u8]) -> String {
     encoded
 }
 
-fn random_string(length: usize) -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(length)
-        .map(char::from)
-        .collect()
-}
-
 fn api_error(body: &str) -> String {
     let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     value
@@ -904,35 +864,6 @@ fn api_error(body: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("request failed")
         .to_owned()
-}
-
-async fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0_u8; 2048];
-    while buffer.len() < 16 * 1024 {
-        let read = stream.read(&mut chunk).await?;
-        if read == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-        if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-    }
-    Ok(buffer)
-}
-
-async fn write_http_response(stream: &mut TcpStream, title: &str, message: &str) -> Result<()> {
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><title>{title}</title><main><h1>{title}</h1><p>{message}</p></main>"
-    );
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(response.as_bytes()).await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -980,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn exclusions_and_animation_rules_are_deterministic() {
+    fn snapshot_exclusions_and_animation_rules_are_stable() {
         assert!(!eligible("profiles.yml"));
         assert!(!eligible("config/profiles.yml"));
         assert!(!eligible("config/credentials.json"));

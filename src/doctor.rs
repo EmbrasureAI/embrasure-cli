@@ -9,6 +9,7 @@ use crate::{
     config::Config,
     metabase,
     snowflake::{QueryResult, Relation, SnowflakeClient, quote_identifier},
+    style::Style,
 };
 
 #[derive(Debug, Serialize)]
@@ -24,27 +25,6 @@ pub struct Diagnostic {
     pub check: String,
     pub status: &'static str,
     pub message: String,
-}
-
-impl DoctorReport {
-    pub fn human(&self) -> String {
-        let mut output = format!(
-            "embrasure doctor: {}\n",
-            if self.ready { "READY" } else { "NOT READY" }
-        );
-        for item in &self.checks {
-            let icon = match item.status {
-                "pass" => "✓",
-                "skip" => "-",
-                _ => "✗",
-            };
-            output.push_str(&format!(
-                "  {icon} {} / {}: {}\n",
-                item.scope, item.check, item.message
-            ));
-        }
-        output
-    }
 }
 
 pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
@@ -313,6 +293,32 @@ fn relation_names(result: &QueryResult) -> Vec<String> {
 }
 
 impl DoctorReport {
+    #[cfg(test)]
+    pub fn human(&self) -> String {
+        self.human_styled(&Style::plain())
+    }
+
+    pub fn human_styled(&self, style: &Style) -> String {
+        let readiness = if self.ready {
+            style.good(&style.bold("READY"))
+        } else {
+            style.bad(&style.bold("NOT READY"))
+        };
+        let mut output = format!("embrasure doctor: {readiness}\n",);
+        for item in &self.checks {
+            let icon = match item.status {
+                "pass" => style.good("✓"),
+                "skip" => style.warn("-"),
+                _ => style.bad("✗"),
+            };
+            output.push_str(&format!(
+                "  {icon} {} / {}: {}\n",
+                item.scope, item.check, item.message
+            ));
+        }
+        output
+    }
+
     fn tool(&mut self, name: &str, command: &str) {
         match Command::new(command).arg("--version").output() {
             Ok(output) if output.status.success() => {
