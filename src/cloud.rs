@@ -78,6 +78,28 @@ pub struct PreparedSnapshot {
     total_bytes: usize,
 }
 
+impl PreparedSnapshot {
+    pub fn downstream_model_count(&self, report: &Report) -> usize {
+        report
+            .impact
+            .dbt_models
+            .iter()
+            .filter(|asset| {
+                !self.files.iter().any(|file| {
+                    let path = Path::new(&file.path);
+                    let is_model =
+                        file.path.starts_with("models/") || file.path.contains("/models/");
+                    is_model
+                        && path.extension().is_some_and(|extension| extension == "sql")
+                        && path
+                            .file_stem()
+                            .is_some_and(|stem| stem == asset.name.as_str())
+                })
+            })
+            .count()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ReviewCache {
     fingerprint: String,
@@ -970,5 +992,40 @@ mod tests {
         let now = Utc::now().to_rfc3339();
         assert!(cache_is_reusable("same", "same", &now, 3));
         assert!(!cache_is_reusable("same", "same", &now, 2));
+    }
+
+    #[test]
+    fn downstream_count_excludes_changed_model_roots() {
+        let snapshot = PreparedSnapshot {
+            dbt_root: "cloud_pipeline_demo".into(),
+            owner: "JacbK".into(),
+            name: "shopify-commerce-analytics".into(),
+            base_sha: "a".repeat(40),
+            head_sha: None,
+            snapshot_hash: "b".repeat(64),
+            fingerprint: "c".repeat(64),
+            files: vec![ChangedFile {
+                path: "cloud_pipeline_demo/models/finance/fct_order_margin.sql".into(),
+                status: "modified".into(),
+                sha256: "d".repeat(64),
+                content_utf8: Some("select 1".into()),
+            }],
+            total_bytes: 8,
+        };
+        let mut report = Report::empty("origin/main".into(), crate::config::Thresholds::default());
+        report.impact.dbt_models = vec![
+            crate::report::ImpactedAsset {
+                id: "model.demo.fct_order_margin".into(),
+                name: "fct_order_margin".into(),
+                url: None,
+            },
+            crate::report::ImpactedAsset {
+                id: "model.demo.finance_daily".into(),
+                name: "finance_daily".into(),
+                url: None,
+            },
+        ];
+
+        assert_eq!(snapshot.downstream_model_count(&report), 1);
     }
 }

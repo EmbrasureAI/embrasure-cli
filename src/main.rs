@@ -389,7 +389,7 @@ async fn main() -> ExitCode {
                                 cloud_result_json(&report, Some(&receipt), report_version)
                             );
                         } else {
-                            let downstream = report.impact.dbt_models.len();
+                            let downstream = snapshot.downstream_model_count(&report);
                             let exposures = report.impact.dbt_exposures.len()
                                 + report.impact.metabase_dashboards.len();
                             println!(
