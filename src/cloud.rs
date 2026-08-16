@@ -278,7 +278,7 @@ pub fn prepare_snapshot(
         manifest.update(file.sha256.as_bytes());
         manifest.update(b"\n");
     }
-    let snapshot_hash = format!("{:x}", manifest.finalize());
+    let snapshot_hash = encode_hex(&manifest.finalize());
     let config_bytes = fs::read(config_path).unwrap_or_default();
     let fingerprint = hex_digest(
         format!(
@@ -863,7 +863,17 @@ fn contains_secret(value: &str) -> bool {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    encode_hex(&Sha256::digest(bytes))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn random_string(length: usize) -> String {
