@@ -1,16 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/EmbrasureAI/embrasure-cli/schemas/report-v2.schema.json",
-  "title": "Embrasure check report v2",
+  "$id": "https://github.com/EmbrasureAI/embrasure-cli/schemas/report-v3.schema.json",
+  "title": "Embrasure check report v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version", "status", "exit_code", "base", "ci_schemas", "thresholds",
-    "summary", "validation_scope", "models", "impact", "findings", "coverage_gaps",
-    "notices", "execution_errors"
+    "summary", "validation_scope", "models", "query_checks", "impact", "findings",
+    "coverage_gaps", "notices", "execution_errors"
   ],
   "properties": {
-    "schema_version": { "const": 2 },
+    "schema_version": { "const": 3 },
     "status": { "enum": ["pass", "findings", "incomplete", "execution_failure"] },
     "exit_code": { "enum": [0, 1, 2, 3] },
     "base": { "type": "string" },
@@ -19,6 +19,7 @@
     "summary": { "$ref": "#/$defs/summary" },
     "validation_scope": { "$ref": "#/$defs/validation_scope" },
     "models": { "type": "array", "items": { "$ref": "#/$defs/model" } },
+    "query_checks": { "type": "array", "items": { "$ref": "#/$defs/query_check" } },
     "impact": { "$ref": "#/$defs/impact" },
     "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
     "coverage_gaps": { "type": "array", "items": { "$ref": "#/$defs/coverage_gap" } },
@@ -46,11 +47,17 @@
     },
     "summary": {
       "type": "object", "additionalProperties": false,
-      "required": ["models_selected", "models_built", "models_compared", "findings", "coverage_gaps"],
+      "required": [
+        "models_selected", "models_built", "models_compared", "query_checks_configured",
+        "query_checks_run", "query_checks_passed", "findings", "coverage_gaps"
+      ],
       "properties": {
         "models_selected": { "type": "integer", "minimum": 0 },
         "models_built": { "type": "integer", "minimum": 0 },
         "models_compared": { "type": "integer", "minimum": 0 },
+        "query_checks_configured": { "type": "integer", "minimum": 0 },
+        "query_checks_run": { "type": "integer", "minimum": 0 },
+        "query_checks_passed": { "type": "integer", "minimum": 0 },
         "findings": { "type": "integer", "minimum": 0 },
         "coverage_gaps": { "type": "integer", "minimum": 0 }
       }
@@ -121,8 +128,8 @@
       "required": [
         "columns", "ci_only_count", "production_only_count", "ci_only_examples",
         "production_only_examples", "ci_duplicate_key_count", "production_duplicate_key_count",
-        "ci_duplicate_rows", "production_duplicate_rows",
-        "ci_null_key_rows", "production_null_key_rows", "ci_duplicate_examples"
+        "ci_duplicate_rows", "production_duplicate_rows", "ci_null_key_rows",
+        "production_null_key_rows", "ci_duplicate_examples"
       ],
       "properties": {
         "columns": { "type": "array", "minItems": 1, "items": { "type": "string" } },
@@ -141,6 +148,83 @@
     },
     "key_examples": {
       "type": "array", "items": { "type": "array", "items": { "type": ["string", "null"] } }
+    },
+    "query_check": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "name", "account", "status", "current_refs", "production_refs", "primary_key",
+        "candidate_relation", "production_relation", "candidate_row_count",
+        "production_row_count", "columns", "comparison", "reason", "invalid_primary_key_reason",
+        "examples_truncated"
+      ],
+      "properties": {
+        "name": { "type": "string" }, "account": { "type": "string" },
+        "status": { "enum": ["planned", "pass", "findings", "incomplete", "skipped", "execution_failure"] },
+        "current_refs": { "type": "array", "items": { "type": "string" } },
+        "production_refs": { "type": "array", "items": { "type": "string" } },
+        "primary_key": { "type": "array", "items": { "type": "string" } },
+        "candidate_relation": { "type": ["string", "null"] },
+        "production_relation": { "type": ["string", "null"] },
+        "candidate_row_count": { "type": ["integer", "null"], "minimum": 0 },
+        "production_row_count": { "type": ["integer", "null"], "minimum": 0 },
+        "columns": { "type": "array", "items": { "$ref": "#/$defs/query_column" } },
+        "comparison": { "anyOf": [{ "$ref": "#/$defs/query_comparison" }, { "type": "null" }] },
+        "reason": { "type": ["string", "null"] },
+        "invalid_primary_key_reason": { "type": ["string", "null"] },
+        "examples_truncated": { "type": "boolean" }
+      }
+    },
+    "query_column": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "candidate_type", "production_type"],
+      "properties": {
+        "name": { "type": "string" },
+        "candidate_type": { "type": ["string", "null"] },
+        "production_type": { "type": ["string", "null"] }
+      }
+    },
+    "query_comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "candidate_only_rows", "production_only_rows", "changed_rows",
+        "candidate_duplicate_keys", "production_duplicate_keys", "candidate_duplicate_rows",
+        "production_duplicate_rows", "candidate_null_key_rows", "production_null_key_rows",
+        "column_mismatches", "examples"
+      ],
+      "properties": {
+        "candidate_only_rows": { "type": "integer", "minimum": 0 },
+        "production_only_rows": { "type": "integer", "minimum": 0 },
+        "changed_rows": { "type": "integer", "minimum": 0 },
+        "candidate_duplicate_keys": { "type": "integer", "minimum": 0 },
+        "production_duplicate_keys": { "type": "integer", "minimum": 0 },
+        "candidate_duplicate_rows": { "type": "integer", "minimum": 0 },
+        "production_duplicate_rows": { "type": "integer", "minimum": 0 },
+        "candidate_null_key_rows": { "type": "integer", "minimum": 0 },
+        "production_null_key_rows": { "type": "integer", "minimum": 0 },
+        "column_mismatches": { "type": "array", "items": { "$ref": "#/$defs/query_column_mismatch" } },
+        "examples": { "type": "array", "items": { "$ref": "#/$defs/query_example" } }
+      }
+    },
+    "query_column_mismatch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["column", "rows"],
+      "properties": {
+        "column": { "type": "string" }, "rows": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "query_example": {
+      "type": "object", "additionalProperties": false,
+      "required": ["key", "candidate", "production", "candidate_multiplicity", "production_multiplicity"],
+      "properties": {
+        "key": { "$ref": "#/$defs/query_example_values" },
+        "candidate": { "$ref": "#/$defs/query_example_values" },
+        "production": { "$ref": "#/$defs/query_example_values" },
+        "candidate_multiplicity": { "type": ["integer", "null"], "minimum": 0 },
+        "production_multiplicity": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "query_example_values": {
+      "type": "array", "items": { "type": ["string", "null"] }
     },
     "finding": {
       "type": "object", "additionalProperties": false, "required": ["model", "check", "message"],

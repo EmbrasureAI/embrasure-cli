@@ -534,7 +534,12 @@ fn privilege_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{auth::ResolvedAuth, config::AuthConfig};
+    use crate::{
+        auth::ResolvedAuth,
+        config::{AuthConfig, SafetyConfig},
+        query::{QueryDiffInput, run_query_diff},
+        report::QueryCheckStatus,
+    };
     use openssl::{rsa::Rsa, sign::Verifier};
 
     #[test]
@@ -789,6 +794,109 @@ mod tests {
             assert_eq!(integrity.rows[0][0].as_deref(), Some("50001"));
             assert_eq!(integrity.rows[0][1].as_deref(), Some("0"));
             assert_eq!(integrity.rows[0][2].as_deref(), Some("1"));
+
+            let query_candidate = Relation {
+                database: account.database.clone(),
+                schema: second_schema.clone(),
+                identifier: "QUERY_CANDIDATE".into(),
+            };
+            let query_production = Relation {
+                database: account.database.clone(),
+                schema: second_schema.clone(),
+                identifier: "QUERY_PRODUCTION".into(),
+            };
+            let candidate_sql = format!("SELECT ID, SEGMENT FROM {}", candidate.sql());
+            let production_sql = format!(
+                "SELECT ID, SEGMENT FROM {} WHERE ID < 50000",
+                baseline.sql()
+            );
+            let query_report = run_query_diff(
+                &client,
+                QueryDiffInput {
+                    name: "duplicate multiplicity",
+                    account: "integration",
+                    current_refs: vec![],
+                    production_refs: vec![],
+                    candidate_sql: &candidate_sql,
+                    production_sql: &production_sql,
+                    candidate: &query_candidate,
+                    production: &query_production,
+                    primary_key: &[],
+                    safety: &SafetyConfig::default(),
+                },
+            )
+            .await?;
+            assert_eq!(query_report.status, QueryCheckStatus::Findings);
+            let comparison = query_report.comparison.unwrap();
+            assert_eq!(comparison.candidate_only_rows, 1);
+            assert_eq!(comparison.production_only_rows, 0);
+            assert_eq!(comparison.examples[0].candidate_multiplicity, Some(2));
+            assert_eq!(comparison.examples[0].production_multiplicity, Some(1));
+
+            let pass_candidate = Relation {
+                database: account.database.clone(),
+                schema: second_schema.clone(),
+                identifier: "QUERY_PASS_CANDIDATE".into(),
+            };
+            let pass_production = Relation {
+                database: account.database.clone(),
+                schema: second_schema.clone(),
+                identifier: "QUERY_PASS_PRODUCTION".into(),
+            };
+            let pass_sql = format!("SELECT ID, SEGMENT FROM {}", baseline.sql());
+            let pass = run_query_diff(
+                &client,
+                QueryDiffInput {
+                    name: "exact keyed pass",
+                    account: "integration",
+                    current_refs: vec![],
+                    production_refs: vec![],
+                    candidate_sql: &pass_sql,
+                    production_sql: &pass_sql,
+                    candidate: &pass_candidate,
+                    production: &pass_production,
+                    primary_key: &["ID".into()],
+                    safety: &SafetyConfig::default(),
+                },
+            )
+            .await?;
+            assert_eq!(pass.status, QueryCheckStatus::Pass);
+
+            let keyed_candidate = Relation {
+                database: account.database.clone(),
+                schema: second_schema.clone(),
+                identifier: "QUERY_KEYED_CANDIDATE".into(),
+            };
+            let keyed_production = Relation {
+                database: account.database.clone(),
+                schema: second_schema.clone(),
+                identifier: "QUERY_KEYED_PRODUCTION".into(),
+            };
+            let candidate_sql = "SELECT COLUMN1::NUMBER(38,0) AS ID, COLUMN2::VARCHAR(20) AS VALUE FROM VALUES (1, 'same'), (2, 'new'), (4, 'added')";
+            let production_sql = "SELECT COLUMN1::NUMBER(38,0) AS ID, COLUMN2::VARCHAR(20) AS VALUE FROM VALUES (1, 'same'), (2, 'old'), (3, 'removed')";
+            let keyed = run_query_diff(
+                &client,
+                QueryDiffInput {
+                    name: "keyed changes",
+                    account: "integration",
+                    current_refs: vec![],
+                    production_refs: vec![],
+                    candidate_sql,
+                    production_sql,
+                    candidate: &keyed_candidate,
+                    production: &keyed_production,
+                    primary_key: &["ID".into()],
+                    safety: &SafetyConfig::default(),
+                },
+            )
+            .await?;
+            assert_eq!(keyed.status, QueryCheckStatus::Findings);
+            let comparison = keyed.comparison.unwrap();
+            assert_eq!(comparison.candidate_only_rows, 1);
+            assert_eq!(comparison.production_only_rows, 1);
+            assert_eq!(comparison.changed_rows, 1);
+            assert_eq!(comparison.column_mismatches[0].column, "VALUE");
+            assert_eq!(comparison.column_mismatches[0].rows, 1);
             Ok::<(), anyhow::Error>(())
         }
         .await;

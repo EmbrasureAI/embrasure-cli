@@ -310,10 +310,24 @@ pub fn cached_review(snapshot: &PreparedSnapshot) -> Result<Option<Report>> {
             return Err(error).with_context(|| format!("could not read {}", path.display()));
         }
     };
-    Ok(
-        (cache.fingerprint == snapshot.fingerprint && cache_is_fresh(&cache.saved_at))
-            .then_some(cache.report),
+    Ok(cache_is_reusable(
+        &cache.fingerprint,
+        &snapshot.fingerprint,
+        &cache.saved_at,
+        cache.report.schema_version,
     )
+    .then_some(cache.report))
+}
+
+fn cache_is_reusable(
+    cached_fingerprint: &str,
+    snapshot_fingerprint: &str,
+    saved_at: &str,
+    report_schema_version: u8,
+) -> bool {
+    cached_fingerprint == snapshot_fingerprint
+        && cache_is_fresh(saved_at)
+        && report_schema_version == 3
 }
 
 pub fn save_review(snapshot: &PreparedSnapshot, report: &Report) -> Result<()> {
@@ -953,5 +967,8 @@ mod tests {
             &(Utc::now() - chrono::Duration::hours(2)).to_rfc3339()
         ));
         assert!(!cache_is_fresh("not-a-timestamp"));
+        let now = Utc::now().to_rfc3339();
+        assert!(cache_is_reusable("same", "same", &now, 3));
+        assert!(!cache_is_reusable("same", "same", &now, 2));
     }
 }

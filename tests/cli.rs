@@ -184,7 +184,7 @@ fn check_exposes_scope_incremental_and_report_controls() {
         .stdout(predicate::str::contains(
             "--report-version <REPORT_VERSION>",
         ))
-        .stdout(predicate::str::contains("possible values: 1, 2"))
+        .stdout(predicate::str::contains("possible values: 1, 2, 3"))
         .stdout(predicate::str::contains("--verbose"));
 }
 

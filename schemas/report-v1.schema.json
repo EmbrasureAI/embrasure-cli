@@ -77,7 +77,7 @@
         "account": { "type": "string" },
         "ci_relation": { "type": "string" },
         "production_relation": { "type": ["string", "null"] },
-        "dbt_build": { "enum": ["pending", "passed", "failed"] },
+        "dbt_build": { "enum": ["planned", "pending", "passed", "failed"] },
         "comparison": {
           "anyOf": [
             { "$ref": "#/$defs/model_comparison" },
