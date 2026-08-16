@@ -35,9 +35,9 @@ embrasure auth login
 embrasure check
 ```
 
-`init` reads your active dbt profile and asks only for missing values. `check` compares your branch with `origin/main` by default.
+By default, `check` compares your branch with `origin/main`.
 
-You need Git, dbt Core 1.5 or newer, and dbt-snowflake 1.5 or newer. You do not need Rust. If you do not have dbt installed yet:
+Requires Git, dbt Core 1.5 or newer, and dbt-snowflake 1.5 or newer. If you do not have dbt installed yet:
 
 ```sh
 python -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2"
@@ -49,10 +49,6 @@ If you do not use Homebrew, use the verified installer:
 curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/install.sh | sh
 ```
 
-The installer verifies `SHA256SUMS` and writes to `/usr/local/bin` when writable, otherwise `~/.local/bin`. Set `EMBRASURE_INSTALL_DIR` to choose another directory.
-
-Use `--config <path>` before or after any subcommand to choose another config file. Run `embrasure doctor` if you need help with setup.
-
 Example result:
 
 ```text
@@ -61,9 +57,9 @@ embrasure: PASS
 5 impacted · 2 validated · 3 not validated
 ```
 
-The default validates changed models and every path to a critical model. Critical targets are tagged `critical`, configured with `critical: true`, or used directly by a dbt exposure. Use `--downstream all` for every downstream model or `--downstream none` for changed models only. Impact is always computed from the full changed set.
-
 ## Focus and preview
+
+The default validates changed models and every path to a critical model. Critical targets are tagged `critical`, configured with `critical: true`, or used directly by a dbt exposure. Use `--downstream all` for every downstream model or `--downstream none` for changed models only. Impact is always computed from the full changed set.
 
 Intersect the changed set with one or more explicit models:
 
@@ -215,6 +211,8 @@ Snowflake zero-copy `CREATE TABLE ... CLONE` supports tables, not every relation
 The validation role needs `SELECT` on the production source and `CREATE TABLE` in the target schema. Run `embrasure doctor`. If the relation should not use clone mode, rerun with `--incremental-mode full-refresh`.
 
 ## Configuration and safety
+
+Use `--config <path>` before or after any subcommand to choose another config file.
 
 See the [example configuration](embrasure-check.example.yml) and [enterprise setup guide](docs/enterprise.md) for service credentials, multiple accounts, model policies, filters, thresholds, concurrency, external changes, cross-account dependencies, Metabase, and grants.
 
