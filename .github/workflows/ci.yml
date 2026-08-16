@@ -21,4 +21,14 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --locked
+      # Guard the release manifest and packaged file set; this project is not published to crates.io.
       - run: cargo package --locked
+
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install minimum supported Rust
+        run: rustup toolchain install 1.85 --profile minimal
+      - run: cargo +1.85 check --locked --all-targets

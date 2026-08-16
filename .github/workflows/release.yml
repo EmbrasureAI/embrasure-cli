@@ -60,7 +60,8 @@ jobs:
           package="embrasure-${version}-${{ matrix.target }}"
           mkdir -p "dist/${package}"
           cp "target/${{ matrix.target }}/release/embrasure" "dist/${package}/embrasure"
-          cp LICENSE NOTICE README.md SECURITY.md "dist/${package}/"
+          cp LICENSE NOTICE README.md SECURITY.md embrasure-check.example.yml "dist/${package}/"
+          cp -R docs "dist/${package}/docs"
           "dist/${package}/embrasure" --version | grep "embrasure ${version}"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
           rm -rf "dist/${package}"
@@ -119,3 +120,49 @@ jobs:
             --verify-tag \
             --title "Embrasure ${GITHUB_REF_NAME}" \
             --generate-notes
+      - name: Move the composite action major tag
+        shell: bash
+        run: |
+          git tag --force v1 "${GITHUB_SHA}"
+          git push origin refs/tags/v1 --force
+
+  tap:
+    needs: publish
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download release checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${GITHUB_REF_NAME}" --pattern SHA256SUMS
+      - name: Check out Homebrew tap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: EmbrasureAI/homebrew-tap
+          token: ${{ secrets.TAP_PUSH_TOKEN }}
+          path: tap
+      - name: Regenerate formula
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          checksum() { awk -v name="$1" '$2 == name { print $1 }' SHA256SUMS; }
+          mac_arm="$(checksum "embrasure-${version}-aarch64-apple-darwin.tar.gz")"
+          mac_intel="$(checksum "embrasure-${version}-x86_64-apple-darwin.tar.gz")"
+          linux_arm="$(checksum "embrasure-${version}-aarch64-unknown-linux-gnu.tar.gz")"
+          linux_intel="$(checksum "embrasure-${version}-x86_64-unknown-linux-gnu.tar.gz")"
+          test -n "${mac_arm}${mac_intel}${linux_arm}${linux_intel}"
+          mkdir -p tap/Formula
+          sed \
+            -e "s/@VERSION@/${version}/g" \
+            -e "s/@MAC_ARM@/${mac_arm}/g" \
+            -e "s/@MAC_INTEL@/${mac_intel}/g" \
+            -e "s/@LINUX_ARM@/${linux_arm}/g" \
+            -e "s/@LINUX_INTEL@/${linux_intel}/g" \
+            .github/embrasure.rb.template > tap/Formula/embrasure.rb
+          cd tap
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Formula/embrasure.rb
+          git diff --cached --quiet || git commit -m "Update Embrasure to ${version}"
+          git push
