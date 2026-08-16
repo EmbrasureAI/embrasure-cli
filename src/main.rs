@@ -351,13 +351,13 @@ async fn main() -> ExitCode {
                     eprintln!("embrasure: could not save the local review cache: {error:#}");
                 }
             }
-            if let Some(path) = markdown
-                && let Err(error) = report.write_markdown(&path)
-            {
-                report
-                    .execution_errors
-                    .push(format!("could not write Markdown report: {error:#}"));
-                report.finalize();
+            if let Some(path) = markdown {
+                if let Err(error) = report.write_markdown(&path) {
+                    report
+                        .execution_errors
+                        .push(format!("could not write Markdown report: {error:#}"));
+                    report.finalize();
+                }
             }
             let report_version = report_version.unwrap_or(report::ReportVersion::V2);
             if use_cloud {
