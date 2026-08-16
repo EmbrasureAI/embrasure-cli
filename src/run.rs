@@ -323,6 +323,7 @@ fn plan_selections(
                 selected
             }
         };
+        let mut select_excluded = BTreeSet::new();
         if !options.select.is_empty() {
             for id in &chosen[account_index] {
                 if !selected.contains(id) {
@@ -332,6 +333,7 @@ fn plan_selections(
                 }
             }
             for id in selected.difference(&chosen[account_index]) {
+                select_excluded.insert(id.clone());
                 report.validation_scope.skipped_models.push(SkippedModel {
                     id: format!("{}:{id}", account.name),
                     reason: "excluded by --select".into(),
@@ -346,6 +348,9 @@ fn plan_selections(
         report.validation_scope.impacted_models += impacted.len();
         report.validation_scope.requested_models += selected.len();
         for id in impacted.difference(&selected) {
+            if select_excluded.contains(id) {
+                continue;
+            }
             report.validation_scope.skipped_models.push(SkippedModel {
                 id: format!("{}:{id}", account.name),
                 reason: if removed.contains(id) {

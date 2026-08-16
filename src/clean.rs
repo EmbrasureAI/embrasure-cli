@@ -63,9 +63,9 @@ async fn run_inner(
             )?;
             let prefix = config.safety.schema_prefix.to_ascii_uppercase();
             let query = format!(
-                "SELECT SCHEMA_NAME, COMMENT, TO_VARCHAR(CREATED) FROM {}.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME LIKE {} ESCAPE '\\\\' AND COMMENT LIKE 'Temporary schema managed by Embrasure;%' AND CREATED < DATEADD('hour', -{}, CURRENT_TIMESTAMP()) ORDER BY CREATED, SCHEMA_NAME",
+                "SELECT SCHEMA_NAME, COMMENT, TO_VARCHAR(CREATED) FROM {}.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME LIKE {} ESCAPE '!' AND COMMENT LIKE 'Temporary schema managed by Embrasure;%' AND CREATED < DATEADD('hour', -{}, CURRENT_TIMESTAMP()) ORDER BY CREATED, SCHEMA_NAME",
                 quote_identifier(&account.database),
-                quote_string(&format!("{prefix}\\_%")),
+                quote_string(&format!("{prefix}!_%")),
                 older_than_hours,
             );
             let rows = client.execute(&query).await?;

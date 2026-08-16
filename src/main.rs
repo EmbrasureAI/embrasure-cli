@@ -315,6 +315,7 @@ async fn main() -> ExitCode {
                         }
                     }
                 }
+                Ok(_) if dry_run => None,
                 Ok(loaded) => cloud::prepare_snapshot(&config, loaded, &base, &options).ok(),
                 Err(_) => None,
             };
