@@ -7,23 +7,16 @@
 
 <p align="center"><strong>Catch unexpected data changes before a dbt PR is reviewed.</strong></p>
 
-Embrasure checks dbt changes against production before you merge. It builds each changed model, plus the path to any critical model downstream, in temporary Snowflake schemas. Then it runs your existing dbt tests, compares the results, shows what is affected, and cleans up.
+Embrasure is open-source, local dbt PR validation for Snowflake:
 
-Local checks connect directly to Snowflake. They require no Embrasure account or hosted service.
-
-## What it catches
-
-- Columns added, removed, renamed, or changed to an incompatible type
-- Shifts in row counts, null rates, cardinality, ranges, averages, and percentiles
-- Primary-key values that appear or disappear
-- Duplicate or null primary keys introduced by a branch
-- Exact differences between arbitrary candidate and production SQL results
-- Existing dbt test failures
-- Affected dbt models and exposures
-- Column dependencies resolved from compiled dbt SQL
-- Declared cross-account dependencies
-- Optional Metabase dashboards
-- Models mapped to non-dbt file changes
+- Builds changed models and critical downstream paths in temporary Snowflake schemas, without writing to production.
+- Runs existing dbt tests and compares the branch with production for schema, row counts, column metrics, primary keys, and exact query results.
+- Shows affected models, exposures, columns, optional Metabase dashboards, and configured dependencies outside dbt.
+- Cleans up its run-owned schemas when the check finishes.
+- Connects directly to Snowflake. `embrasure auth login` starts Snowflake OAuth; it does not create or use an Embrasure account.
+- Keeps credentials and browser sessions local. No warehouse data, dbt artifacts, or reports are uploaded to Embrasure.
+- Uses a Snowflake role with warehouse usage, production read access, and permission to create and remove temporary schemas.
+- Includes a [`verify`](.agents/skills/verify/SKILL.md) agent skill that runs the check, fixes findings, and repeats until the full check passes.
 
 ## Quickstart
 
@@ -55,8 +48,6 @@ curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/inst
 ```
 
 Use Embrasure from an existing Snowflake dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
-
-Your Snowflake role needs warehouse usage, read access to the production relations, and permission to create and remove temporary schemas in the configured database.
 
 `init` reads the active dbt profile and asks only for missing values. Continue when `embrasure doctor` reports `READY`.
 
