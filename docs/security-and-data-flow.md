@@ -1,6 +1,6 @@
 # Security and data flow
 
-By default, Embrasure runs on your machine or runner. Local `embrasure check` does not require an Embrasure account, hosted service, API key, or network connection to Embrasure. Cloud handoff is a separate, explicit opt-in through `embrasure check --cloud`.
+Embrasure runs on your machine or runner. `embrasure check` does not require an Embrasure account, hosted service, API key, or network connection to Embrasure.
 
 ## Data flow
 
@@ -13,25 +13,12 @@ Local Git repository + local dbt + Embrasure CLI
                          |
                          | Aggregate metrics and optional key examples
                          v
-                 Local terminal or report
+Local terminal or report
 
 Optional: Embrasure reads metadata from your configured Metabase URL.
-
-Optional and explicit: `embrasure check --cloud` sends a bounded source snapshot and local review evidence to Embrasure Cloud. The CLI prints every included path and the total size before upload.
 ```
 
-Local validation SQL runs in Snowflake. Without `--cloud`, Embrasure does not upload warehouse data, dbt artifacts, reports, credentials, or usage information to Embrasure.
-
-With `--cloud`, the CLI sends only:
-
-- GitHub repository owner and name, dbt subdirectory, base reference, and commit hashes
-- Eligible changed dbt text files, their paths, statuses, and SHA-256 hashes
-- The local review report and selected lineage evidence
-- The business intent supplied through `--context` or `--context-file`
-- CLI version and operating-system name
-- `notify_slack: true`, which asks the service to send its configured Slack notification
-
-Cloud handoff never sends Snowflake credentials, Embrasure access or refresh tokens, `profiles.yml`, `.env*`, private keys, binaries, symlinks, `target`, `logs`, `dbt_packages`, or virtual environments. Before upload, a nine-substring denylist rejects common credential patterns. The Cloud API contract also requires the server to repeat path, size, encoding, hash, and secret checks.
+Validation SQL runs in Snowflake. Embrasure does not upload warehouse data, dbt artifacts, reports, credentials, or usage information to Embrasure.
 
 ## Outbound connections
 
@@ -39,7 +26,6 @@ The CLI itself makes only these connections:
 
 - `https://<account>.snowflakecomputing.com` for browser authentication and Snowflake SQL API requests.
 - The configured Metabase URL when the optional Metabase integration is enabled.
-- `https://app.embrasure.ai` and `https://api.embrasure.ai` only after `embrasure cloud login` or an explicit `embrasure check --cloud`. Development can override the API with `EMBRASURE_API_URL` and the browser origin with `EMBRASURE_WEB_URL`.
 - `https://api.github.com/repos/EmbrasureAI/embrasure-cli/releases/latest` for `embrasure update --check`, `embrasure update`, and the gated doctor notice.
 - `https://github.com/EmbrasureAI/embrasure-cli/releases/download/...` when `embrasure update` downloads a release and its checksums.
 
@@ -66,8 +52,6 @@ Query checks accept a single read-only query expression, but syntax validation i
 - Programmatic access tokens and external OAuth tokens are read from environment variables.
 - RSA private keys are read from the configured local path.
 - Browser OAuth sessions are cached under `~/.config/embrasure-check/oauth/` by default. Files and directories use owner-only permissions on Unix. Run `embrasure auth logout` to remove a cached session.
-- Embrasure Cloud access and refresh tokens use the OS credential store under the separate `ai.embrasure.cli.cloud` service. Run `embrasure cloud logout` to revoke and remove that session. They are never stored in the local handoff receipt.
-- The OS application cache stores the last local-review fingerprint and report so an unchanged review can be reused. The handoff receipt stores only run IDs, URLs, hashes, and timestamps. Neither file stores uploaded source content or credentials.
 - Temporary dbt profiles, manifests, target directories, and the detached base worktree live under an operating-system temporary directory and are removed after the process exits normally.
 
 Credentials are not included in normal terminal output, JSON reports, or Markdown reports.

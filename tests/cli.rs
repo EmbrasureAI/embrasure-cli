@@ -12,8 +12,7 @@ fn help_exposes_enterprise_setup_commands() {
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("check"))
         .stdout(predicate::str::contains("doctor"))
-        .stdout(predicate::str::contains("auth"))
-        .stdout(predicate::str::contains("cloud"));
+        .stdout(predicate::str::contains("auth"));
 }
 
 #[test]
@@ -199,6 +198,7 @@ fn legacy_report_version_requires_json_output() {
 }
 
 #[test]
+#[cfg(feature = "cloud-demo")]
 fn check_exposes_explicit_cloud_handoff_controls() {
     Command::cargo_bin("embrasure")
         .unwrap()
@@ -211,6 +211,7 @@ fn check_exposes_explicit_cloud_handoff_controls() {
 }
 
 #[test]
+#[cfg(feature = "cloud-demo")]
 fn cloud_context_cannot_accidentally_enable_network_handoff() {
     Command::cargo_bin("embrasure")
         .unwrap()
@@ -221,6 +222,7 @@ fn cloud_context_cannot_accidentally_enable_network_handoff() {
 }
 
 #[test]
+#[cfg(feature = "cloud-demo")]
 fn cloud_subcommands_are_discoverable() {
     Command::cargo_bin("embrasure")
         .unwrap()
@@ -247,12 +249,30 @@ fn global_config_works_before_and_after_subcommands() {
         .assert()
         .code(3)
         .stdout(predicate::str::contains("missing-b.yml"));
+}
+
+#[test]
+#[cfg(not(feature = "cloud-demo"))]
+fn default_release_has_no_cloud_surface() {
     Command::cargo_bin("embrasure")
         .unwrap()
-        .args(["cloud", "status", "--help"])
+        .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("--config"));
+        .stdout(predicate::str::contains("cloud").not());
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--cloud").not())
+        .stdout(predicate::str::contains("--context").not());
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .arg("cloud")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 #[test]
@@ -273,17 +293,22 @@ fn completions_support_only_documented_shells() {
 }
 
 #[test]
-fn dry_run_conflicts_with_cloud_and_json_is_ansi_free() {
-    Command::cargo_bin("embrasure")
-        .unwrap()
-        .args(["check", "--dry-run", "--cloud"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("cannot be used with"));
+fn json_output_is_ansi_free() {
     Command::cargo_bin("embrasure")
         .unwrap()
         .args(["check", "--json", "--config", "missing.yml"])
         .assert()
         .code(3)
         .stdout(predicate::str::contains("\x1b").not());
+}
+
+#[test]
+#[cfg(feature = "cloud-demo")]
+fn dry_run_conflicts_with_cloud() {
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["check", "--dry-run", "--cloud"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }

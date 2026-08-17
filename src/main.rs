@@ -1,5 +1,6 @@
 mod auth;
 mod clean;
+#[cfg(feature = "cloud-demo")]
 mod cloud;
 mod compare;
 mod config;
@@ -147,14 +148,18 @@ enum Command {
         #[arg(long = "select", value_name = "MODEL")]
         select: Vec<String>,
         /// Plan validation without creating schemas or querying warehouse data.
-        #[arg(long, conflicts_with = "cloud")]
+        #[arg(long)]
+        #[cfg_attr(feature = "cloud-demo", arg(conflicts_with = "cloud"))]
         dry_run: bool,
+        #[cfg(feature = "cloud-demo")]
         /// Hand the exact validated working state to a durable Embrasure Cloud agent.
         #[arg(long)]
         cloud: bool,
+        #[cfg(feature = "cloud-demo")]
         /// Business intent used to create bounded validation assertions. Repeat to preserve ordering.
         #[arg(long = "context", value_name = "BUSINESS_INTENT", requires = "cloud")]
         context: Vec<String>,
+        #[cfg(feature = "cloud-demo")]
         /// Read additional business intent from a UTF-8 file.
         #[arg(long, value_name = "PATH", requires = "cloud")]
         context_file: Option<PathBuf>,
@@ -173,7 +178,8 @@ enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
-    /// Manage the optional Embrasure Cloud session and durable runs.
+    #[cfg(feature = "cloud-demo")]
+    /// Manage the Embrasure Cloud demo session and durable runs.
     Cloud {
         #[command(subcommand)]
         command: CloudCommand,
@@ -224,6 +230,7 @@ enum AuthCommand {
     },
 }
 
+#[cfg(feature = "cloud-demo")]
 #[derive(Debug, Subcommand)]
 enum CloudCommand {
     /// Sign in through the browser and save a separate OS-keychain session.
@@ -285,10 +292,15 @@ async fn main() -> ExitCode {
             verbose,
             select,
             dry_run,
-            cloud: use_cloud,
+            #[cfg(feature = "cloud-demo")]
+            cloud,
+            #[cfg(feature = "cloud-demo")]
             context,
+            #[cfg(feature = "cloud-demo")]
             context_file,
         } => {
+            #[cfg(feature = "cloud-demo")]
+            let use_cloud = cloud;
             let options = run::CheckOptions {
                 mode: mode.map(Into::into),
                 downstream: downstream.map(Into::into),
@@ -296,49 +308,70 @@ async fn main() -> ExitCode {
                 incremental_mode: incremental_mode.map(Into::into),
                 select,
             };
-            let intent = if use_cloud {
-                match cloud::normalize_context(&context, context_file.as_deref()) {
-                    Ok(value) => Some(value),
-                    Err(error) => return fail(error),
-                }
-            } else {
-                None
-            };
             let loaded_config = run::load_config(&config, &options);
-            let snapshot = match loaded_config.as_ref() {
-                Ok(loaded) if use_cloud => {
-                    match cloud::prepare_snapshot(&config, loaded, &base, &options) {
+
+            #[cfg(feature = "cloud-demo")]
+            let (intent, snapshot, mut report) = {
+                let intent = if use_cloud {
+                    match cloud::normalize_context(&context, context_file.as_deref()) {
                         Ok(value) => Some(value),
-                        Err(error) => {
-                            return fail(format_args!(
-                                "could not prepare cloud snapshot: {error:#}"
-                            ));
+                        Err(error) => return fail(error),
+                    }
+                } else {
+                    None
+                };
+                let snapshot = match loaded_config.as_ref() {
+                    Ok(loaded) if use_cloud => {
+                        match cloud::prepare_snapshot(&config, loaded, &base, &options) {
+                            Ok(value) => Some(value),
+                            Err(error) => {
+                                return fail(format_args!(
+                                    "could not prepare cloud snapshot: {error:#}"
+                                ));
+                            }
                         }
                     }
-                }
-                Ok(_) if dry_run => None,
-                Ok(loaded) => cloud::prepare_snapshot(&config, loaded, &base, &options).ok(),
-                Err(_) => None,
-            };
-            let cached = snapshot
-                .as_ref()
-                .and_then(|value| cloud::cached_review(value).ok().flatten());
-            let mut report = if use_cloud {
-                if let Some(report) = cached {
-                    eprintln!("Reusing the local review for this exact working-tree state");
-                    report
+                    Ok(_) if dry_run => None,
+                    Ok(loaded) => cloud::prepare_snapshot(&config, loaded, &base, &options).ok(),
+                    Err(_) => None,
+                };
+                let cached = snapshot
+                    .as_ref()
+                    .and_then(|value| cloud::cached_review(value).ok().flatten());
+                let report = if use_cloud {
+                    if let Some(report) = cached {
+                        eprintln!("Reusing the local review for this exact working-tree state");
+                        report
+                    } else {
+                        eprintln!(
+                            "The working tree or review configuration changed; rerunning local review"
+                        );
+                        match loaded_config {
+                            Ok(config) => {
+                                run::run_check_with_config(config, &base, &options, dry_run).await
+                            }
+                            Err(error) => run::failed_check(&base, error),
+                        }
+                    }
                 } else {
-                    eprintln!(
-                        "The working tree or review configuration changed; rerunning local review"
-                    );
+                    eprintln!("embrasure: validating changes against {base}");
                     match loaded_config {
                         Ok(config) => {
                             run::run_check_with_config(config, &base, &options, dry_run).await
                         }
                         Err(error) => run::failed_check(&base, error),
                     }
+                };
+                if let Some(snapshot) = &snapshot {
+                    if let Err(error) = cloud::save_review(snapshot, &report) {
+                        eprintln!("embrasure: could not save the local review cache: {error:#}");
+                    }
                 }
-            } else {
+                (intent, snapshot, report)
+            };
+
+            #[cfg(not(feature = "cloud-demo"))]
+            let mut report = {
                 eprintln!("embrasure: validating changes against {base}");
                 match loaded_config {
                     Ok(config) => {
@@ -347,11 +380,6 @@ async fn main() -> ExitCode {
                     Err(error) => run::failed_check(&base, error),
                 }
             };
-            if let Some(snapshot) = &snapshot {
-                if let Err(error) = cloud::save_review(snapshot, &report) {
-                    eprintln!("embrasure: could not save the local review cache: {error:#}");
-                }
-            }
             if let Some(path) = markdown {
                 if let Err(error) = report.write_markdown(&path) {
                     report
@@ -361,6 +389,8 @@ async fn main() -> ExitCode {
                 }
             }
             let report_version = report_version.unwrap_or(report::ReportVersion::V3);
+
+            #[cfg(feature = "cloud-demo")]
             if use_cloud {
                 if report.exit_code == report::EXIT_EXECUTION {
                     if json {
@@ -381,7 +411,7 @@ async fn main() -> ExitCode {
                 )
                 .await;
                 drop(progress);
-                match receipt {
+                return match receipt {
                     Ok(receipt) => {
                         if json {
                             println!(
@@ -409,8 +439,10 @@ async fn main() -> ExitCode {
                         }
                         fail(error)
                     }
-                }
-            } else if json {
+                };
+            }
+
+            if json {
                 match report.json(report_version) {
                     Ok(value) => println!("{value}"),
                     Err(error) => {
@@ -483,6 +515,7 @@ async fn main() -> ExitCode {
                 }
             }
         },
+        #[cfg(feature = "cloud-demo")]
         Command::Cloud { command } => match command {
             CloudCommand::Login => match cloud::login().await {
                 Ok(session) => {
@@ -626,6 +659,7 @@ async fn main() -> ExitCode {
     }
 }
 
+#[cfg(feature = "cloud-demo")]
 fn cloud_result_json(
     report: &report::Report,
     receipt: Option<&cloud::HandoffReceipt>,
