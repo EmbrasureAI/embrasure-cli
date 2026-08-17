@@ -25,7 +25,15 @@ Embrasure is open-source, local dbt PR validation for Snowflake:
 
 ## Quickstart
 
-From an existing Snowflake dbt Core project where `dbt` already runs, install Embrasure on macOS or Linux:
+From your existing Snowflake dbt Core project directory, create or activate its Python environment:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2" "sqlglot>=30,<31"
+```
+
+Then install Embrasure on macOS or Linux with Homebrew:
 
 ```sh
 brew install embrasureai/tap/embrasure
@@ -39,7 +47,7 @@ embrasure check
 By default, `check` compares your branch with `origin/main`.
 
 <details>
-<summary>If dbt is not available</summary>
+<summary>If dbt is managed by your project</summary>
 
 Embrasure uses the dbt Core and Snowflake adapter versions already installed by your project. Activate the project's normal environment, or set `dbt.command` in `embrasure-check.yml` to the wrapper your project uses.
 
@@ -50,6 +58,8 @@ If you do not use Homebrew, use the installer:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/install.sh | sh
 ```
+
+The installer writes to `/usr/local/bin` when writable, otherwise `~/.local/bin`. Set `EMBRASURE_INSTALL_DIR` to choose another directory.
 
 <details>
 <summary><strong>Installing on Windows (Windows 11 or Windows Server 2022+)</strong></summary>
@@ -93,7 +103,11 @@ winget install --id EmbrasureAI.Embrasure --exact
 
 Use Embrasure from an existing Snowflake dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
 
-`init` reads the active dbt profile and asks only for missing values. Continue when `embrasure doctor` reports `READY`.
+`init` reads the active dbt profile and asks only for missing values. Use `--config <path>` before or after any subcommand to choose another config file.
+
+Continue only when `embrasure doctor` reports `READY`. Embrasure generates a temporary dbt profile for its own runs; it does not modify your existing profile or production models.
+
+If dbt is installed in `.venv`, run `source .venv/bin/activate` in each new shell before using Embrasure.
 
 Example result:
 
