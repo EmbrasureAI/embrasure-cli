@@ -16,11 +16,11 @@ use crate::{
         SafetyConfig, Thresholds,
     },
     dbt::{self, DbtContext, Manifest, ManifestNode},
-    git, metabase,
+    git, lineage, metabase,
     query::{QueryDiffInput, QueryTemplate, RefTarget, run_query_diff},
     report::{
-        CiSchema, CoverageGap, Finding, ModelReport, Notice, QueryCheckReport, QueryCheckStatus,
-        Report, SkippedModel,
+        CiSchema, ColumnLineageGap, CoverageGap, Finding, ModelReport, Notice, QueryCheckReport,
+        QueryCheckStatus, Report, SkippedModel,
     },
     snowflake::{Relation, SnowflakeClient, is_managed_schema},
 };
@@ -965,6 +965,26 @@ async fn execute_with_dbt(
                 });
             }
             continue;
+        }
+
+        match context.build_manifest(&account.name).and_then(|compiled| {
+            lineage::extract(
+                &account.name,
+                manifest,
+                production_manifest,
+                &compiled,
+                selected,
+            )
+        }) {
+            Ok(extraction) => {
+                report.impact.column_lineage.extend(extraction.edges);
+                report.impact.column_lineage_gaps.extend(extraction.gaps);
+            }
+            Err(error) => report.impact.column_lineage_gaps.push(ColumnLineageGap {
+                account: account.name.clone(),
+                model: "selected models".into(),
+                reason: format!("column lineage was unavailable: {error:#}"),
+            }),
         }
 
         for id in selected {
@@ -1920,6 +1940,7 @@ mod tests {
                 materialized: materialized.into(),
                 ..NodeConfig::default()
             },
+            compiled_code: None,
         }
     }
 
@@ -1956,6 +1977,7 @@ checks:
             tags: vec![],
             depends_on: DependsOn::default(),
             config: NodeConfig::default(),
+            compiled_code: None,
         };
         assert_eq!(relation_for(&node, "OTHER", "CHECK").schema, "CHECK");
     }
@@ -1996,6 +2018,7 @@ checks:
             tags: vec![],
             depends_on: DependsOn::default(),
             config: NodeConfig::default(),
+            compiled_code: None,
         };
 
         assert_eq!(
@@ -2025,6 +2048,7 @@ checks:
                 materialized: String::new(),
                 unique_key: None,
             },
+            compiled_code: None,
         };
 
         assert_eq!(
