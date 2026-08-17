@@ -1,0 +1,51 @@
+[package]
+name = "embrasure-cli"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Embrasure CLI for validating dbt changes against production Snowflake data"
+license = "Apache-2.0"
+repository = "https://github.com/EmbrasureAI/embrasure-cli"
+homepage = "https://embrasure.ai"
+readme = "README.md"
+keywords = ["dbt", "snowflake", "data-quality", "cli"]
+categories = ["command-line-utilities", "development-tools::testing"]
+
+[[bin]]
+name = "embrasure"
+path = "src/main.rs"
+
+[features]
+default = []
+cloud-demo = ["dep:keyring"]
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.23"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
+globset = "0.4"
+directories = "6.0"
+keyring = { version = "3.6", optional = true }
+openssl = { version = "0.10", features = ["vendored"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
+sha2 = "0.11"
+tempfile = "3.20"
+tokio = { version = "1.45", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
+url = "2.5"
+uuid = { version = "1.16", features = ["v4", "serde"] }
+webbrowser = "1.0"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+jsonschema = { version = "0.33", default-features = false }
+predicates = "3.1"
+
+[profile.release]
+lto = "thin"
+strip = true
