@@ -530,13 +530,6 @@ fn plan_selections(
             query_checks,
         });
     }
-    if !report.impact.dbt_models.is_empty() {
-        report.notices.push(Notice {
-            scope: "dbt".into(),
-            code: "column_lineage_unavailable".into(),
-            message: "dbt artifacts provide model-level, not authoritative column-level, dependency edges".into(),
-        });
-    }
     if selected_count > config.safety.max_models {
         let mut has_runnable_query = false;
         for (account, selection) in config.accounts.iter().zip(&mut selections) {
@@ -2496,6 +2489,12 @@ checks:
         assert_eq!(
             selections[0].selected,
             BTreeSet::from([changed_id.into(), target_id.into()])
+        );
+        assert!(
+            report
+                .notices
+                .iter()
+                .all(|notice| notice.code != "column_lineage_unavailable")
         );
 
         report.models.push(ModelReport {

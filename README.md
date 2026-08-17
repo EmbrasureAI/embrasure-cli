@@ -54,17 +54,11 @@ If you do not use Homebrew, use the installer:
 curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/install.sh | sh
 ```
 
-The installer writes to `/usr/local/bin` when writable, otherwise `~/.local/bin`. Set `EMBRASURE_INSTALL_DIR` to choose another directory.
-
 Use Embrasure from an existing Snowflake dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
 
 Your Snowflake role needs warehouse usage, read access to the production relations, and permission to create and remove temporary schemas in the configured database.
 
-`init` reads the active dbt profile and asks only for missing values. Use `--config <path>` before or after any subcommand to choose another config file.
-
-Continue only when `embrasure doctor` reports `READY`. Embrasure generates a temporary dbt profile for its own runs; it does not modify your existing profile or production models.
-
-If dbt is installed in `.venv`, run `source .venv/bin/activate` in each new shell before using Embrasure.
+`init` reads the active dbt profile and asks only for missing values. Continue when `embrasure doctor` reports `READY`.
 
 Example result:
 
