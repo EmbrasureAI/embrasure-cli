@@ -50,6 +50,7 @@ impl Style {
     }
 }
 
+#[cfg(feature = "cloud-demo")]
 pub fn animation_enabled() -> bool {
     std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }

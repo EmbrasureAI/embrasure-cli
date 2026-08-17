@@ -15,6 +15,10 @@ categories = ["command-line-utilities", "development-tools::testing"]
 name = "embrasure"
 path = "src/main.rs"
 
+[features]
+default = []
+cloud-demo = ["dep:keyring"]
+
 [dependencies]
 anyhow = "1.0"
 base64 = "0.23"
@@ -23,7 +27,7 @@ clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 globset = "0.4"
 directories = "6.0"
-keyring = "3.6"
+keyring = { version = "3.6", optional = true }
 openssl = { version = "0.10", features = ["vendored"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -77,7 +77,7 @@ embrasure check --dry-run
 embrasure check --dry-run --json
 ```
 
-Dry runs use local dbt parsing but do not resolve credentials, create Snowflake schemas, or query warehouse data. `--dry-run` cannot be combined with `--cloud`.
+Dry runs use local dbt parsing but do not resolve credentials, create Snowflake schemas, or query warehouse data.
 
 ## Reports and exit codes
 
@@ -155,20 +155,6 @@ jobs:
 ```
 
 `fetch-depth: 0` is required because selection compares the working tree with the base revision.
-
-## Cloud handoff
-
-Cloud handoff is optional. It sends the exact reviewed state and local evidence to a durable agent:
-
-```sh
-embrasure cloud login
-embrasure cloud whoami
-embrasure check --cloud \
-  --context "Preserve one row per order. Refunds reduce net revenue. Missing discounts are zero."
-embrasure cloud status
-```
-
-`--cloud` requires business intent and prints every eligible path before upload. A plain `check` primes the local review cache. The next `check --cloud` reuses it only when the repository, dbt root, base SHA, snapshot, CLI version, and check configuration match. Run `embrasure auth status` or `embrasure cloud whoami` to inspect session readiness without printing secrets.
 
 ## Maintenance
 
