@@ -5,6 +5,11 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://github.com/EmbrasureAI/embrasure-cli/actions/workflows/github-code-scanning/codeql"><img src="https://github.com/EmbrasureAI/embrasure-cli/actions/workflows/github-code-scanning/codeql/badge.svg" alt="CodeQL"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/EmbrasureAI/embrasure-cli"><img src="https://api.scorecard.dev/projects/github.com/EmbrasureAI/embrasure-cli/badge" alt="OpenSSF Scorecard"></a>
+</p>
+
 <p align="center"><strong>Catch unexpected data changes before a dbt PR is reviewed.</strong></p>
 
 Embrasure is open-source, local dbt PR validation for Snowflake:
