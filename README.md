@@ -27,29 +27,44 @@ Local checks connect directly to Snowflake. They require no Embrasure account or
 
 ## Quickstart
 
-From your dbt project directory:
+From your existing dbt project directory, create or activate its Python environment:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2" "sqlglot>=30,<31"
+```
+
+Install Embrasure on macOS or Linux with Homebrew:
 
 ```sh
 brew install embrasureai/tap/embrasure
-python3 -m pip install "sqlglot>=30,<31"
 embrasure init
 embrasure auth login
+embrasure doctor
+embrasure check --dry-run
 embrasure check
 ```
 
 By default, `check` compares your branch with `origin/main`.
 
-Requires Git, dbt Core 1.5 or newer, and dbt-snowflake 1.5 or newer. If you do not have dbt installed yet:
-
-```sh
-python3 -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2"
-```
-
-If you do not use Homebrew, use the verified installer:
+If you do not use Homebrew, use the installer:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/install.sh | sh
 ```
+
+The installer writes to `/usr/local/bin` when writable, otherwise `~/.local/bin`. Set `EMBRASURE_INSTALL_DIR` to choose another directory.
+
+Use Embrasure from an existing Snowflake dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
+
+Your Snowflake role needs warehouse usage, read access to the production relations, and permission to create and remove temporary schemas in the configured database.
+
+`init` reads the active dbt profile and asks only for missing values. Use `--config <path>` before or after any subcommand to choose another config file.
+
+Continue only when `embrasure doctor` reports `READY`. Embrasure generates a temporary dbt profile for its own runs; it does not modify your existing profile or production models.
+
+If dbt is installed in `.venv`, run `source .venv/bin/activate` in each new shell before using Embrasure.
 
 Example result:
 
