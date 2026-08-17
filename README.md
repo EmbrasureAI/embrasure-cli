@@ -9,14 +9,13 @@
 
 Embrasure is open-source, local dbt PR validation for Snowflake:
 
-- Builds changed models and critical downstream paths in temporary Snowflake schemas, without writing to production.
-- Runs existing dbt tests and compares the branch with production for schema, row counts, column metrics, primary keys, and exact query results.
-- Shows affected models, exposures, columns, optional Metabase dashboards, and configured dependencies outside dbt.
-- Cleans up its run-owned schemas when the check finishes.
-- Connects directly to Snowflake. `embrasure auth login` starts Snowflake OAuth; it does not create or use an Embrasure account.
-- Keeps credentials and browser sessions local. No warehouse data, dbt artifacts, or reports are uploaded to Embrasure.
-- Uses a Snowflake role with warehouse usage, production read access, and permission to create and remove temporary schemas.
-- Includes a [`verify`](.agents/skills/verify/SKILL.md) agent skill that runs the check, fixes findings, and repeats until the full check passes.
+- Builds changed models and critical downstream paths in temporary schemas, then cleans them up.
+- Runs dbt tests and compares schema, row counts, null rates, cardinality, ranges, and primary keys with production.
+- Shows affected downstream models and columns.
+- Connects directly to Snowflake, with no Embrasure account or data sent to Embrasure.
+- Includes a [`verify`](.agents/skills/verify/SKILL.md) skill that runs the agent check-and-fix loop.
+
+`embrasure auth login` uses Snowflake OAuth. Your role needs warehouse access, production read access, and permission to create and remove temporary schemas.
 
 ## Quickstart
 
