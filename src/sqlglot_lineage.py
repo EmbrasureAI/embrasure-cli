@@ -1,9 +1,28 @@
 import json
+import re
 import sys
 
 import sqlglot
 from sqlglot import exp
 from sqlglot.lineage import lineage
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def error_text(error):
+    details = getattr(error, "errors", None)
+    if details:
+        detail = details[0]
+        description = detail.get("description", type(error).__name__)
+        line = detail.get("line")
+        column = detail.get("col")
+        if line is not None and column is not None:
+            return f"{description} at line {line}, column {column}"
+        return description
+
+    cleaned = ANSI_ESCAPE.sub("", str(error))
+    return " ".join(cleaned.split())[:500]
 
 
 def identifier(value):
@@ -35,7 +54,7 @@ def trace_model(model):
         return {
             "unique_id": model["unique_id"],
             "edges": [],
-            "gaps": [f"SQLGlot could not parse the compiled SQL: {error}"],
+            "gaps": [f"SQLGlot could not parse the compiled SQL: {error_text(error)}"],
         }
 
     for select in expression.selects:
@@ -57,7 +76,9 @@ def trace_model(model):
                 dialect="snowflake",
             )
         except Exception as error:
-            gaps.append(f"{output_column} could not be resolved by SQLGlot: {error}")
+            gaps.append(
+                f"{output_column} could not be resolved by SQLGlot: {error_text(error)}"
+            )
             continue
         if not output_is_quoted:
             output_column = output_column.upper()

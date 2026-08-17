@@ -2,7 +2,7 @@ name: Install Embrasure
 description: Install a verified Embrasure CLI release and add it to PATH.
 inputs:
   version:
-    description: Release version, such as 0.4.0. Defaults to the latest release.
+    description: Release version without the leading v. Defaults to the latest release.
     required: false
     default: latest
 runs:

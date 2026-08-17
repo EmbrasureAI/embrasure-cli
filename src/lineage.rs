@@ -316,6 +316,95 @@ mod tests {
     }
 
     #[test]
+    fn sqlglot_traces_common_snowflake_patterns() {
+        let request = Request {
+            models: vec![
+                ModelRequest {
+                    unique_id: "model.project.case_join",
+                    sql: "select coalesce(o.customer_id, c.id) as customer_id, case when o.status = 'paid' then o.amount else 0 end as paid_amount from raw.orders o left join raw.customers c on o.customer_id = c.id",
+                },
+                ModelRequest {
+                    unique_id: "model.project.qualify",
+                    sql: "select customer_id, row_number() over (partition by customer_id order by created_at desc) as order_rank from raw.orders qualify order_rank = 1",
+                },
+                ModelRequest {
+                    unique_id: "model.project.variant",
+                    sql: "select payload:customer.id::number as customer_id from raw.events",
+                },
+                ModelRequest {
+                    unique_id: "model.project.flatten",
+                    sql: "select f.value:name::string as item_name from raw.events e, lateral flatten(input => e.payload:items) f",
+                },
+            ],
+        };
+        let response = invoke(&request).unwrap();
+        assert!(response.models.iter().all(|model| model.gaps.is_empty()));
+
+        let case_join = response
+            .models
+            .iter()
+            .find(|model| model.unique_id.ends_with("case_join"))
+            .unwrap();
+        assert!(case_join.edges.iter().any(|edge| {
+            edge.output_column == "PAID_AMOUNT"
+                && edge.source_relation == "RAW.ORDERS"
+                && edge.source_column == "STATUS"
+        }));
+        assert!(case_join.edges.iter().any(|edge| {
+            edge.output_column == "CUSTOMER_ID"
+                && edge.source_relation == "RAW.CUSTOMERS"
+                && edge.source_column == "ID"
+        }));
+
+        let qualify = response
+            .models
+            .iter()
+            .find(|model| model.unique_id.ends_with("qualify"))
+            .unwrap();
+        assert!(qualify.edges.iter().any(|edge| {
+            edge.output_column == "ORDER_RANK" && edge.source_column == "CREATED_AT"
+        }));
+
+        let variant = response
+            .models
+            .iter()
+            .find(|model| model.unique_id.ends_with("variant"))
+            .unwrap();
+        assert!(variant.edges.iter().any(|edge| {
+            edge.output_column == "CUSTOMER_ID" && edge.source_column == "PAYLOAD"
+        }));
+
+        let flatten = response
+            .models
+            .iter()
+            .find(|model| model.unique_id.ends_with("flatten"))
+            .unwrap();
+        assert!(
+            flatten.edges.iter().any(|edge| {
+                edge.output_column == "ITEM_NAME" && edge.source_column == "PAYLOAD"
+            })
+        );
+    }
+
+    #[test]
+    fn sqlglot_parse_gaps_are_stable_and_terminal_safe() {
+        let request = Request {
+            models: vec![ModelRequest {
+                unique_id: "model.project.invalid",
+                sql: "select from definitely not valid",
+            }],
+        };
+        let response = invoke(&request).unwrap();
+        let gap = &response.models[0].gaps[0];
+        assert_eq!(
+            gap,
+            "SQLGlot could not parse the compiled SQL: Invalid expression / Unexpected token at line 1, column 26"
+        );
+        assert!(!gap.contains('\u{1b}'));
+        assert!(!gap.contains("definitely not valid"));
+    }
+
+    #[test]
     fn sqlglot_marks_wildcards_as_gaps_instead_of_guessing() {
         let request = Request {
             models: vec![ModelRequest {
@@ -409,5 +498,124 @@ mod tests {
                 && edge.from_column == "AMOUNT"
                 && edge.to_column == "GROSS"
         }));
+    }
+
+    #[test]
+    fn extraction_keeps_multi_model_column_paths_composable() {
+        let staging = model("model.project.staging", "CI", None);
+        let mut summary = model("model.project.summary", "CI", None);
+        summary.depends_on.nodes = vec![staging.unique_id.clone()];
+        let current = manifest(vec![staging, summary]);
+        let production = manifest(vec![
+            model("model.project.staging", "PROD", None),
+            model("model.project.summary", "PROD", None),
+        ]);
+        let compiled = manifest(vec![
+            model(
+                "model.project.staging",
+                "CI",
+                Some("select order_id, amount from RAW.ORDERS"),
+            ),
+            model(
+                "model.project.summary",
+                "CI",
+                Some("select order_id, amount * 2 as gross from DB.CI.staging"),
+            ),
+        ]);
+
+        let extraction = extract(
+            "primary",
+            &current,
+            &production,
+            &compiled,
+            &BTreeSet::from([
+                "model.project.staging".into(),
+                "model.project.summary".into(),
+            ]),
+        )
+        .unwrap();
+
+        assert!(extraction.gaps.is_empty());
+        assert!(extraction.edges.iter().any(|edge| {
+            edge.from == "RAW.ORDERS"
+                && edge.from_column == "AMOUNT"
+                && edge.to == "model.project.staging"
+                && edge.to_column == "AMOUNT"
+        }));
+        assert!(extraction.edges.iter().any(|edge| {
+            edge.from == "model.project.staging"
+                && edge.from_column == "AMOUNT"
+                && edge.to == "model.project.summary"
+                && edge.to_column == "GROSS"
+        }));
+    }
+
+    #[test]
+    fn extraction_reports_missing_sql_and_ambiguous_relations() {
+        let mut left = model("model.project.left", "CI", None);
+        left.alias = "shared".into();
+        let mut right = model("model.project.right", "CI", None);
+        right.alias = "shared".into();
+        let target = model("model.project.target", "CI", None);
+        let missing = model("model.project.missing", "CI", None);
+        let current = manifest(vec![left, right, target, missing]);
+        let production = manifest(vec![]);
+        let compiled = manifest(vec![model(
+            "model.project.target",
+            "CI",
+            Some("select id from DB.CI.shared"),
+        )]);
+
+        let extraction = extract(
+            "primary",
+            &current,
+            &production,
+            &compiled,
+            &BTreeSet::from([
+                "model.project.missing".into(),
+                "model.project.target".into(),
+            ]),
+        )
+        .unwrap();
+
+        assert!(extraction.edges.is_empty());
+        assert!(extraction.gaps.iter().any(|gap| {
+            gap.model == "model.project.missing"
+                && gap.reason == "dbt did not emit compiled SQL for this model"
+        }));
+        assert!(extraction.gaps.iter().any(|gap| {
+            gap.model == "model.project.target"
+                && gap.reason.contains("matches more than one dbt model")
+        }));
+    }
+
+    #[test]
+    fn extraction_respects_quoted_relation_names() {
+        let mut source = model("model.project.source", "CaseSchema", None);
+        source.alias = "CaseTable".into();
+        source.config.quoting.schema = Some(true);
+        source.config.quoting.identifier = Some(true);
+        let mut target = model("model.project.target", "CI", None);
+        target.depends_on.nodes = vec![source.unique_id.clone()];
+        let current = manifest(vec![source, target]);
+        let compiled = manifest(vec![model(
+            "model.project.target",
+            "CI",
+            Some("select \"CaseColumn\" from DB.\"CaseSchema\".\"CaseTable\""),
+        )]);
+
+        let extraction = extract(
+            "primary",
+            &current,
+            &manifest(vec![]),
+            &compiled,
+            &BTreeSet::from(["model.project.target".into()]),
+        )
+        .unwrap();
+
+        assert!(extraction.gaps.is_empty());
+        assert_eq!(extraction.edges.len(), 1);
+        assert_eq!(extraction.edges[0].from, "model.project.source");
+        assert_eq!(extraction.edges[0].from_column, "CaseColumn");
     }
 }
