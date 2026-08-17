@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify"
+  short_description: "Verify dbt changes with Embrasure"
+  default_prompt: "Use $verify to validate my dbt changes and fix every finding."
