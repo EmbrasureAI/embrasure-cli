@@ -29,7 +29,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - run: python3 -m pip install "sqlglot>=30,<31"
+      - run: python3 -m pip install --require-hashes -r packaging/sqlglot-requirements.txt
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --locked
