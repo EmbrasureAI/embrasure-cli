@@ -8,6 +8,7 @@ mod dbt;
 mod doctor;
 mod git;
 mod init;
+mod lineage;
 mod loopback;
 mod metabase;
 mod query;
@@ -388,7 +389,7 @@ async fn main() -> ExitCode {
                     report.finalize();
                 }
             }
-            let report_version = report_version.unwrap_or(report::ReportVersion::V3);
+            let report_version = report_version.unwrap_or(report::ReportVersion::V4);
 
             #[cfg(feature = "cloud-demo")]
             if use_cloud {

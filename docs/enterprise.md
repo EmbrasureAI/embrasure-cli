@@ -134,7 +134,7 @@ embrasure check --base origin/main --json --markdown embrasure-check.md
 
 Exit `0` is ready for review, `1` is a finding, `2` is missing evidence, and `3` is a setup or execution failure.
 
-Report v3 is the default JSON contract and adds query-diff evidence. V1 and v2 remain unchanged compatibility projections and can be requested with `--json --report-version 1` or `--json --report-version 2`.
+Report v4 is the default JSON contract and adds column lineage. V1 through v3 remain available with `--report-version`.
 
 ## Reference
 
@@ -200,6 +200,6 @@ Table-level zero-copy clones preserve Snowflake micro-partitions. Views, hybrid 
 
 ### Lineage boundary
 
-Local evidence includes dbt model lineage, dbt exposures, declared cross-account edges, and optional Metabase SQL matches. It does not prove warehouse-to-dashboard column lineage.
+Local evidence includes dbt model lineage, column dependencies resolved from compiled dbt SQL, dbt exposures, declared cross-account edges, and optional Metabase SQL matches. Wildcards without an input schema and dynamic SQL remain explicit gaps.
 
-Authoritative column lineage requires Snowflake access history and BI APIs. Its limits include extra Snowflake permissions, metadata latency, dynamic SQL, separate BI credentials, and inaccessible assets.
+Warehouse-to-dashboard column lineage still requires Snowflake access history and BI APIs.

@@ -44,6 +44,8 @@ pub struct ManifestNode {
     pub depends_on: DependsOn,
     #[serde(default)]
     pub config: NodeConfig,
+    #[serde(default, alias = "compiled_sql")]
+    pub compiled_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -648,6 +650,10 @@ impl DbtContext {
         self.scratch.path().join("build-target").join(account)
     }
 
+    pub fn build_manifest(&self, account: &str) -> Result<Manifest> {
+        Manifest::load(&self.build_target(account).join("manifest.json"))
+    }
+
     pub fn cleanup_worktree(&mut self) -> Result<()> {
         let Some(mut registration) = self.base_worktree.take() else {
             return Ok(());
@@ -1099,6 +1105,7 @@ mod tests {
             tags: vec![],
             depends_on: DependsOn::default(),
             config: NodeConfig::default(),
+            compiled_code: None,
         }
     }
 

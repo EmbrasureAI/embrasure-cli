@@ -21,6 +21,8 @@ pub enum ReportVersion {
     V2,
     #[value(name = "3")]
     V3,
+    #[value(name = "4")]
+    V4,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -249,6 +251,10 @@ pub struct ImpactReport {
     pub dbt_exposures: Vec<ImpactedAsset>,
     pub dbt_lineage: Vec<LineageEdge>,
     pub dbt_lineage_changes: Vec<LineageChange>,
+    #[serde(skip)]
+    pub column_lineage: Vec<ColumnLineageEdge>,
+    #[serde(skip)]
+    pub column_lineage_gaps: Vec<ColumnLineageGap>,
     pub metabase_dashboards: Vec<ImpactedAsset>,
     pub cross_account_dependencies: Vec<CrossAccountDependency>,
 }
@@ -280,6 +286,24 @@ pub enum LineageChangeKind {
 pub struct LineageChange {
     pub change: LineageChangeKind,
     pub edge: LineageEdge,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ColumnLineageEdge {
+    pub account: String,
+    pub from: String,
+    pub from_name: String,
+    pub from_column: String,
+    pub to: String,
+    pub to_name: String,
+    pub to_column: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ColumnLineageGap {
+    pub account: String,
+    pub model: String,
+    pub reason: String,
 }
 
 impl Report {
@@ -329,6 +353,10 @@ impl Report {
         self.impact.dbt_lineage.dedup();
         self.impact.dbt_lineage_changes.sort();
         self.impact.dbt_lineage_changes.dedup();
+        self.impact.column_lineage.sort();
+        self.impact.column_lineage.dedup();
+        self.impact.column_lineage_gaps.sort();
+        self.impact.column_lineage_gaps.dedup();
         self.impact.metabase_dashboards.sort();
         self.impact.metabase_dashboards.dedup();
         for dependency in &mut self.impact.cross_account_dependencies {
@@ -490,6 +518,34 @@ impl Report {
                 );
             }
         }
+        if !self.impact.column_lineage.is_empty() || !self.impact.column_lineage_gaps.is_empty() {
+            let _ = writeln!(
+                output,
+                "Column lineage: {} edges · {} unresolved",
+                self.impact.column_lineage.len(),
+                self.impact.column_lineage_gaps.len()
+            );
+            if verbose {
+                for edge in &self.impact.column_lineage {
+                    let _ = writeln!(
+                        output,
+                        "  {}.{} -> {}.{} ({})",
+                        edge.from_name,
+                        edge.from_column,
+                        edge.to_name,
+                        edge.to_column,
+                        edge.account
+                    );
+                }
+                for gap in &self.impact.column_lineage_gaps {
+                    let _ = writeln!(
+                        output,
+                        "  unresolved {} ({}): {}",
+                        gap.model, gap.account, gap.reason
+                    );
+                }
+            }
+        }
         for asset in &self.impact.metabase_dashboards {
             let _ = writeln!(output, "- [impact:metabase] {}", asset.name);
         }
@@ -508,6 +564,7 @@ impl Report {
             ReportVersion::V1 => serde_json::to_value(ReportV1::from(self)),
             ReportVersion::V2 => serde_json::to_value(ReportV2::from(self)),
             ReportVersion::V3 => serde_json::to_value(self),
+            ReportVersion::V4 => serde_json::to_value(ReportV4::from(self)),
         }
     }
 
@@ -722,6 +779,26 @@ impl Report {
                 );
             }
         }
+        if !self.impact.column_lineage.is_empty() || !self.impact.column_lineage_gaps.is_empty() {
+            output.push_str("\n## Column lineage\n\n");
+            if self.impact.column_lineage.is_empty() {
+                output.push_str("No column edges resolved.\n");
+            }
+            for edge in &self.impact.column_lineage {
+                let _ = writeln!(
+                    output,
+                    "- `{}`.`{}` → `{}`.`{}` ({})",
+                    edge.from_name, edge.from_column, edge.to_name, edge.to_column, edge.account
+                );
+            }
+            for gap in &self.impact.column_lineage_gaps {
+                let _ = writeln!(
+                    output,
+                    "- Unresolved `{}` ({}): {}",
+                    gap.model, gap.account, gap.reason
+                );
+            }
+        }
         if !self.execution_errors.is_empty() {
             output.push_str("\n## Execution errors\n\n");
             for error in &self.execution_errors {
@@ -830,6 +907,68 @@ impl Report {
                 "  ... {} more; rerun with --verbose",
                 total - state.count
             );
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ReportV4<'a> {
+    schema_version: u8,
+    status: Status,
+    exit_code: u8,
+    base: &'a str,
+    ci_schemas: &'a [CiSchema],
+    thresholds: Thresholds,
+    summary: &'a Summary,
+    validation_scope: &'a ValidationScope,
+    models: &'a [ModelReport],
+    query_checks: &'a [QueryCheckReport],
+    impact: ImpactReportV4<'a>,
+    findings: &'a [Finding],
+    coverage_gaps: &'a [CoverageGap],
+    notices: &'a [Notice],
+    execution_errors: &'a [String],
+}
+
+#[derive(Serialize)]
+struct ImpactReportV4<'a> {
+    dbt_models: &'a [ImpactedAsset],
+    dbt_exposures: &'a [ImpactedAsset],
+    dbt_lineage: &'a [LineageEdge],
+    dbt_lineage_changes: &'a [LineageChange],
+    column_lineage: &'a [ColumnLineageEdge],
+    column_lineage_gaps: &'a [ColumnLineageGap],
+    metabase_dashboards: &'a [ImpactedAsset],
+    cross_account_dependencies: &'a [CrossAccountDependency],
+}
+
+impl<'a> From<&'a Report> for ReportV4<'a> {
+    fn from(report: &'a Report) -> Self {
+        Self {
+            schema_version: 4,
+            status: report.status,
+            exit_code: report.exit_code,
+            base: &report.base,
+            ci_schemas: &report.ci_schemas,
+            thresholds: report.thresholds,
+            summary: &report.summary,
+            validation_scope: &report.validation_scope,
+            models: &report.models,
+            query_checks: &report.query_checks,
+            impact: ImpactReportV4 {
+                dbt_models: &report.impact.dbt_models,
+                dbt_exposures: &report.impact.dbt_exposures,
+                dbt_lineage: &report.impact.dbt_lineage,
+                dbt_lineage_changes: &report.impact.dbt_lineage_changes,
+                column_lineage: &report.impact.column_lineage,
+                column_lineage_gaps: &report.impact.column_lineage_gaps,
+                metabase_dashboards: &report.impact.metabase_dashboards,
+                cross_account_dependencies: &report.impact.cross_account_dependencies,
+            },
+            findings: &report.findings,
+            coverage_gaps: &report.coverage_gaps,
+            notices: &report.notices,
+            execution_errors: &report.execution_errors,
         }
     }
 }
@@ -1243,7 +1382,22 @@ mod tests {
 
     #[test]
     fn reports_match_their_published_json_schemas() {
-        let report = representative_report();
+        let mut report = representative_report();
+        report.impact.column_lineage.push(ColumnLineageEdge {
+            account: "primary".into(),
+            from: "model.project.orders".into(),
+            from_name: "orders".into(),
+            from_column: "ORDER_ID".into(),
+            to: "model.project.summary".into(),
+            to_name: "summary".into(),
+            to_column: "ORDER_ID".into(),
+        });
+        report.impact.column_lineage_gaps.push(ColumnLineageGap {
+            account: "primary".into(),
+            model: "model.project.wildcard".into(),
+            reason: "SELECT * cannot be expanded".into(),
+        });
+        report.finalize();
         assert_matches_schema(
             &report,
             ReportVersion::V1,
@@ -1258,6 +1412,11 @@ mod tests {
             &report,
             ReportVersion::V3,
             include_str!("../schemas/report-v3.schema.json"),
+        );
+        assert_matches_schema(
+            &report,
+            ReportVersion::V4,
+            include_str!("../schemas/report-v4.schema.json"),
         );
         let mut planned = report.clone();
         planned.models[0].dbt_build = "planned".into();
@@ -1277,6 +1436,11 @@ mod tests {
             ReportVersion::V3,
             include_str!("../schemas/report-v3.schema.json"),
         );
+        assert_matches_schema(
+            &planned,
+            ReportVersion::V4,
+            include_str!("../schemas/report-v4.schema.json"),
+        );
 
         let v1: serde_json::Value =
             serde_json::from_str(&report.json(ReportVersion::V1).unwrap()).unwrap();
@@ -1291,6 +1455,20 @@ mod tests {
             serde_json::from_str(&report.json(ReportVersion::V2).unwrap()).unwrap();
         assert!(v2.get("query_checks").is_none());
         assert!(v2["summary"].get("query_checks_run").is_none());
+        let v3: serde_json::Value =
+            serde_json::from_str(&report.json(ReportVersion::V3).unwrap()).unwrap();
+        assert!(v3["impact"].get("column_lineage").is_none());
+        let v4: serde_json::Value =
+            serde_json::from_str(&report.json(ReportVersion::V4).unwrap()).unwrap();
+        assert_eq!(v4["schema_version"], 4);
+        assert_eq!(v4["impact"]["column_lineage"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            v4["impact"]["column_lineage_gaps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
 
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("../schemas/report-v3.schema.json")).unwrap();

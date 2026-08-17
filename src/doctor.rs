@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     auth,
     config::Config,
-    metabase,
+    lineage, metabase,
     snowflake::{QueryResult, Relation, SnowflakeClient, quote_identifier},
     style::Style,
 };
@@ -53,6 +53,10 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
     }
     report.tool("git", "git");
     report.tool("dbt", &config.dbt.command);
+    match lineage::probe() {
+        Ok(version) => report.pass("local", "sqlglot", format!("SQLGlot {version}")),
+        Err(error) => report.fail("local", "sqlglot", format!("{error:#}")),
+    }
 
     for account in &config.accounts {
         let scope = format!("snowflake:{}", account.name);

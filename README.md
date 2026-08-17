@@ -20,6 +20,7 @@ Local checks connect directly to Snowflake. They require no Embrasure account or
 - Exact differences between arbitrary candidate and production SQL results
 - Existing dbt test failures
 - Affected dbt models and exposures
+- Column dependencies resolved from compiled dbt SQL
 - Declared cross-account dependencies
 - Optional Metabase dashboards
 - Models mapped to non-dbt file changes
@@ -30,6 +31,7 @@ From your dbt project directory:
 
 ```sh
 brew install embrasureai/tap/embrasure
+python3 -m pip install "sqlglot>=30,<31"
 embrasure init
 embrasure auth login
 embrasure check
@@ -40,7 +42,7 @@ By default, `check` compares your branch with `origin/main`.
 Requires Git, dbt Core 1.5 or newer, and dbt-snowflake 1.5 or newer. If you do not have dbt installed yet:
 
 ```sh
-python -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2"
+python3 -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2"
 ```
 
 If you do not use Homebrew, use the verified installer:
@@ -53,7 +55,7 @@ Example result:
 
 ```text
 embrasure: PASS
-2 selected · 2 built · 2 compared · 0 findings · 0 coverage gaps
+2 selected · 2 built · 2 compared · 0 query checks run · 0 findings · 0 coverage gaps
 5 impacted · 2 validated · 3 not validated
 ```
 
@@ -89,7 +91,7 @@ embrasure check --json --markdown embrasure-check.md
 embrasure check --json --report-version 1
 ```
 
-Published contracts: [report v1](schemas/report-v1.schema.json), [report v2](schemas/report-v2.schema.json), and [report v3](schemas/report-v3.schema.json). V3 is the default; v1 and v2 remain explicit compatibility projections.
+Published contracts: [v1](schemas/report-v1.schema.json), [v2](schemas/report-v2.schema.json), [v3](schemas/report-v3.schema.json), and [v4](schemas/report-v4.schema.json). V4 adds column lineage and is the default; older versions remain available with `--report-version`.
 
 | Exit code | Meaning |
 |---:|---|
@@ -155,7 +157,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2"
+      - run: python3 -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2" "sqlglot>=30,<31"
       - uses: EmbrasureAI/embrasure-cli@v1
       - run: embrasure check --base origin/main --json
         env:
@@ -217,7 +219,8 @@ Every temporary schema has a unique name and ownership marker. Query results are
 ## Current limits
 
 - Snowflake is the only supported warehouse.
-- dbt artifacts provide model lineage and exposures, not authoritative warehouse-to-dashboard column lineage.
+- Column lineage covers compiled dbt SQL that SQLGlot can resolve. Wildcards without an input schema and dynamic SQL are reported as unresolved.
+- Dashboard column lineage is not inferred from model lineage.
 - Metabase matching covers native SQL cards that reference fully qualified production relations. Unsupported or inaccessible metadata becomes a coverage gap.
 
 ## Development
