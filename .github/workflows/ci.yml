@@ -9,6 +9,14 @@ permissions:
   contents: read
 
 jobs:
+  action:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install through the documented action
+        uses: EmbrasureAI/embrasure-cli@ee29a94f6bf8c6299f5ef6cf592ff8d41fe5aed8
+      - name: Verify the installed CLI
+        run: embrasure --version | grep '^embrasure '
+
   rust:
     runs-on: ubuntu-24.04
     steps:

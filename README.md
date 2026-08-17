@@ -134,6 +134,14 @@ Only persisted dbt models are supported in `ref()`. Query checks accept one `SEL
 
 The composite action installs the CLI. Keep the check in a visible `run` step so exit codes and secrets remain explicit.
 
+In `embrasure-check.yml`, configure the account to read the CI secret:
+
+```yaml
+auth:
+  type: programmatic_access_token
+  token_env: SNOWFLAKE_PROGRAMMATIC_ACCESS_TOKEN
+```
+
 ```yaml
 jobs:
   embrasure:
@@ -148,7 +156,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2"
-      - uses: EmbrasureAI/embrasure-cli@v1
+      - uses: EmbrasureAI/embrasure-cli@ee29a94f6bf8c6299f5ef6cf592ff8d41fe5aed8
       - run: embrasure check --base origin/main --json
         env:
           SNOWFLAKE_PROGRAMMATIC_ACCESS_TOKEN: ${{ secrets.SNOWFLAKE_PROGRAMMATIC_ACCESS_TOKEN }}
