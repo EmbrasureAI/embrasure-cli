@@ -21,7 +21,12 @@ impl Style {
 
     fn new(is_terminal: bool) -> Self {
         Self {
-            enabled: is_terminal && std::env::var_os("NO_COLOR").is_none(),
+            enabled: enabled_for(
+                is_terminal,
+                std::env::var_os("NO_COLOR").is_some(),
+                std::env::var_os("CI").is_some(),
+                std::env::var("TERM").is_ok_and(|term| term.eq_ignore_ascii_case("dumb")),
+            ),
         }
     }
 
@@ -50,9 +55,13 @@ impl Style {
     }
 }
 
+const fn enabled_for(is_terminal: bool, no_color: bool, ci: bool, dumb_terminal: bool) -> bool {
+    is_terminal && !no_color && !ci && !dumb_terminal
+}
+
 #[cfg(feature = "cloud-demo")]
 pub fn animation_enabled() -> bool {
-    std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    Style::stderr().enabled
 }
 
 #[cfg(test)]
@@ -67,5 +76,14 @@ mod tests {
         assert_eq!(styled.bad("FAIL"), "\x1b[31mFAIL\x1b[0m");
         assert_eq!(styled.warn("WARN"), "\x1b[33mWARN\x1b[0m");
         assert_eq!(styled.bold("READY"), "\x1b[1mREADY\x1b[0m");
+    }
+
+    #[test]
+    fn styling_only_runs_in_an_interactive_terminal() {
+        assert!(enabled_for(true, false, false, false));
+        assert!(!enabled_for(false, false, false, false));
+        assert!(!enabled_for(true, true, false, false));
+        assert!(!enabled_for(true, false, true, false));
+        assert!(!enabled_for(true, false, false, true));
     }
 }

@@ -17,6 +17,7 @@ use crate::{
     },
     dbt::{self, DbtContext, Manifest, ManifestNode},
     git, lineage, metabase,
+    progress::{Phase, Reporter as ProgressReporter},
     query::{QueryDiffInput, QueryTemplate, RefTarget, run_query_diff},
     report::{
         CiSchema, ColumnLineageGap, CoverageGap, Finding, ModelReport, Notice, QueryCheckReport,
@@ -94,6 +95,7 @@ pub struct CheckOptions {
     pub critical_tags: Option<Vec<String>>,
     pub incremental_mode: Option<IncrementalMode>,
     pub select: Vec<String>,
+    pub progress: Option<ProgressReporter>,
 }
 
 async fn execute(
@@ -103,6 +105,9 @@ async fn execute(
     dry_run: bool,
     report: &mut Report,
 ) -> Result<()> {
+    if let Some(progress) = &options.progress {
+        progress.phase(Phase::Setup);
+    }
     dbt::verify_executable(&config.dbt.command)?;
     let resolved_auth = if dry_run {
         config
@@ -129,6 +134,9 @@ async fn execute(
     let main_result = {
         let main = async {
             if !dry_run {
+                if let Some(progress) = &options.progress {
+                    progress.phase(Phase::Schema);
+                }
                 for account in &config.accounts {
                     let client = SnowflakeClient::new(
                         account,
@@ -147,21 +155,32 @@ async fn execute(
                         schema: schema.clone(),
                         cleaned_up: false,
                     });
-                    client
+                    clients.push(client);
+                    clients
+                        .last()
+                        .context("Snowflake client disappeared before schema creation")?
                         .create_schema(&account.database, &schema)
                         .await
                         .with_context(|| {
                             format!("could not create CI schema for account {}", account.name)
                         })?;
-                    clients.push(client);
                 }
             }
 
+            if let Some(progress) = &options.progress {
+                progress.phase(Phase::Impact);
+            }
             let mut context = dbt::prepare(config, &resolved_auth, base, &schema, &query_tag)?;
             let query_check_changes =
                 query_check_changes(config, base, &context.repo_root, report)?;
             let selections =
                 plan_selections(config, &context, options, &query_check_changes, report)?;
+            if let Some(progress) = &options.progress {
+                progress.scope(
+                    report.validation_scope.impacted_models,
+                    report.validation_scope.requested_models,
+                );
+            }
             if dry_run {
                 report.notices.push(Notice {
                     scope: "validation".into(),
@@ -177,8 +196,16 @@ async fn execute(
                     plan_query_reports(config, &context, &selections, report);
                     Ok(())
                 } else {
-                    execute_with_dbt(config, &mut context, &clients, &schema, &selections, report)
-                        .await
+                    execute_with_dbt(
+                        config,
+                        &mut context,
+                        &clients,
+                        &schema,
+                        &selections,
+                        report,
+                        options.progress.as_ref(),
+                    )
+                    .await
                 }
             } else {
                 Ok(())
@@ -201,9 +228,16 @@ async fn execute(
     };
 
     if let Err(error) = main_result {
+        if let Some(progress) = &options.progress {
+            progress.fail_current();
+        }
         report.execution_errors.push(format!("{error:#}"));
     }
-    cleanup_schemas(config, &clients, &schema, report).await;
+    if let Some(progress) = &options.progress {
+        progress.phase(Phase::Cleanup);
+        progress.cleanup(0, report.ci_schemas.len());
+    }
+    cleanup_schemas(config, &clients, &schema, report, options.progress.as_ref()).await;
     Ok(())
 }
 
@@ -744,9 +778,15 @@ async fn execute_with_dbt(
     ci_schema: &str,
     selections: &[AccountSelection],
     report: &mut Report,
+    progress: Option<&ProgressReporter>,
 ) -> Result<()> {
     let removed_production_relations =
         plan_model_reports(config, context, selections, "pending", report)?;
+    let mut models_built = 0usize;
+    if let Some(progress) = progress {
+        progress.phase(Phase::Build);
+        progress.built(0);
+    }
     let mut all_selected = BTreeSet::new();
     for selection in selections {
         all_selected.extend(selection.removed.iter().cloned());
@@ -942,6 +982,9 @@ async fn execute_with_dbt(
         )
         .with_context(|| format!("could not execute dbt build for account {}", account.name))?;
         if !build.passed {
+            if let Some(progress) = progress {
+                progress.fail_current();
+            }
             for id in selected {
                 if let Some(model) = find_model_mut(report, id, &account.name) {
                     model.dbt_build = "failed".into();
@@ -959,6 +1002,10 @@ async fn execute_with_dbt(
                 });
             }
             continue;
+        }
+        models_built += selected.len();
+        if let Some(progress) = progress {
+            progress.built(models_built);
         }
 
         match context.build_manifest(&account.name).and_then(|compiled| {
@@ -1045,6 +1092,11 @@ async fn execute_with_dbt(
         &baseline_relations,
         report,
     );
+    let comparison_total = comparison_jobs.len() + query_jobs.len();
+    if let Some(progress) = progress {
+        progress.phase(Phase::Compare);
+        progress.comparisons(0, comparison_total);
+    }
     let (completed, completed_queries) = timeout(
         Duration::from_secs(config.comparison.timeout_seconds),
         async {
@@ -1053,9 +1105,19 @@ async fn execute_with_dbt(
                 config.comparison.concurrency,
                 config.comparison.mode,
                 config.safety.clone(),
+                progress,
+                comparison_total,
             )
             .await?;
-            let queries = run_query_comparisons(query_jobs, config.comparison.concurrency).await?;
+            let model_count = models.len();
+            let queries = run_query_comparisons(
+                query_jobs,
+                config.comparison.concurrency,
+                progress,
+                model_count,
+                comparison_total,
+            )
+            .await?;
             Ok::<_, anyhow::Error>((models, queries))
         },
     )
@@ -1108,6 +1170,11 @@ async fn execute_with_dbt(
                 });
             }
         }
+    }
+    if !report.execution_errors.is_empty()
+        && let Some(progress) = progress
+    {
+        progress.fail_current();
     }
 
     if let Some(metabase_config) = &config.metabase {
@@ -1446,6 +1513,9 @@ fn query_scope(name: &str) -> String {
 async fn run_query_comparisons(
     jobs: Vec<QueryComparisonJob>,
     concurrency: usize,
+    progress: Option<&ProgressReporter>,
+    offset: usize,
+    total: usize,
 ) -> Result<Vec<CompletedQueryComparison>> {
     let mut pending = jobs.into_iter();
     let mut running = JoinSet::new();
@@ -1456,6 +1526,9 @@ async fn run_query_comparisons(
     }
     while let Some(result) = running.join_next().await {
         completed.push(result.context("query-comparison worker stopped unexpectedly")?);
+        if let Some(progress) = progress {
+            progress.comparisons(offset + completed.len(), total);
+        }
         if let Some(job) = pending.next() {
             spawn_query_comparison(&mut running, job);
         }
@@ -1502,6 +1575,8 @@ async fn run_comparisons(
     concurrency: usize,
     mode: ComparisonMode,
     safety: SafetyConfig,
+    progress: Option<&ProgressReporter>,
+    total: usize,
 ) -> Result<Vec<CompletedComparison>> {
     let mut pending = jobs.into_iter();
     let mut running = JoinSet::new();
@@ -1513,6 +1588,9 @@ async fn run_comparisons(
     }
     while let Some(result) = running.join_next().await {
         completed.push(result.context("comparison worker stopped unexpectedly")?);
+        if let Some(progress) = progress {
+            progress.comparisons(completed.len(), total);
+        }
         if let Some(job) = pending.next() {
             spawn_comparison(&mut running, job, mode, safety.clone());
         }
@@ -1561,6 +1639,7 @@ async fn cleanup_schemas(
     clients: &[SnowflakeClient],
     run_schema: &str,
     report: &mut Report,
+    progress: Option<&ProgressReporter>,
 ) {
     let cleanup_targets = report
         .ci_schemas
@@ -1575,6 +1654,8 @@ async fn cleanup_schemas(
             )
         })
         .collect::<Vec<_>>();
+    let total = cleanup_targets.len();
+    let mut completed = 0usize;
     for (record_index, account_name, database, target_schema) in cleanup_targets.into_iter().rev() {
         let Some(account_index) = config
             .accounts
@@ -1584,9 +1665,23 @@ async fn cleanup_schemas(
             report.execution_errors.push(format!(
                 "could not map CI schema {database}.{target_schema} back to its account for cleanup"
             ));
+            completed += 1;
+            if let Some(progress) = progress {
+                progress.cleanup(completed, total);
+            }
             continue;
         };
-        match clients[account_index]
+        let Some(client) = clients.get(account_index) else {
+            report.execution_errors.push(format!(
+                "could not recover the Snowflake connection needed to clean up {database}.{target_schema}; run `embrasure clean` or remove it manually"
+            ));
+            completed += 1;
+            if let Some(progress) = progress {
+                progress.cleanup(completed, total);
+            }
+            continue;
+        };
+        match client
             .drop_schema(&database, &target_schema, run_schema)
             .await
         {
@@ -1599,6 +1694,10 @@ async fn cleanup_schemas(
                 "CI schema cleanup failed for {}.{}; run `embrasure clean` or remove it manually: {error:#}",
                 database, target_schema,
             )),
+        }
+        completed += 1;
+        if let Some(progress) = progress {
+            progress.cleanup(completed, total);
         }
     }
 }
