@@ -24,15 +24,7 @@ Embrasure is open-source, local dbt PR validation for Snowflake:
 
 ## Quickstart
 
-From your existing dbt project directory, create or activate its Python environment:
-
-```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2" "sqlglot>=30,<31"
-```
-
-Install Embrasure on macOS or Linux with Homebrew:
+From an existing Snowflake dbt Core project where `dbt` already runs:
 
 ```sh
 brew install embrasureai/tap/embrasure
@@ -44,6 +36,13 @@ embrasure check
 ```
 
 By default, `check` compares your branch with `origin/main`.
+
+<details>
+<summary>If dbt is not available</summary>
+
+Embrasure uses the dbt Core and Snowflake adapter versions already installed by your project. Activate the project's normal environment, or set `dbt.command` in `embrasure-check.yml` to the wrapper your project uses.
+
+</details>
 
 If you do not use Homebrew, use the installer:
 
@@ -138,7 +137,7 @@ Only persisted dbt models are supported in `ref()`. Query checks accept one `SEL
 
 ## GitHub Actions
 
-The composite action installs the CLI. Keep the check in a visible `run` step so exit codes and secrets remain explicit.
+The composite action installs Embrasure. Install dbt with your project's normal locked setup; this example uses `requirements.txt`. Keep the check in a visible `run` step so exit codes and secrets remain explicit.
 
 In `embrasure-check.yml`, configure the account to read the CI secret:
 
@@ -161,7 +160,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: python3 -m pip install "dbt-core>=1.5,<2" "dbt-snowflake>=1.5,<2" "sqlglot>=30,<31"
+      - run: python3 -m pip install -r requirements.txt
       - uses: EmbrasureAI/embrasure-cli@v1
       - run: embrasure check --base origin/main --json
         env:

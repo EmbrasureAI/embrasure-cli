@@ -26,6 +26,7 @@ class Embrasure < Formula
 
   def install
     bin.install "embrasure"
+    (libexec/"embrasure").install "python"
   end
 
   test do

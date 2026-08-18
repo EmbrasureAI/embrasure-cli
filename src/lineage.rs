@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     io::Write,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -159,8 +160,16 @@ pub fn probe() -> Result<String> {
 }
 
 fn invoke(request: &Request<'_>) -> Result<Response> {
-    let mut child = Command::new(python_command())
-        .args(["-c", SCRIPT])
+    let bundled = bundled_sqlglot_path()?;
+    let mut command = Command::new(python_command());
+    if bundled.is_some() {
+        command.arg("-I");
+    }
+    command.args(["-c", SCRIPT]);
+    if let Some(path) = &bundled {
+        command.arg(path);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -190,6 +199,85 @@ fn invoke(request: &Request<'_>) -> Result<Response> {
 
 fn python_command() -> String {
     env::var("EMBRASURE_PYTHON").unwrap_or_else(|_| "python3".into())
+}
+
+fn bundled_sqlglot_path() -> Result<Option<PathBuf>> {
+    if let Some(path) = env::var_os("EMBRASURE_SQLGLOT_PATH") {
+        let path = PathBuf::from(path);
+        if let Some(path) = find_sqlglot(&path)? {
+            return Ok(Some(path));
+        }
+        bail!(
+            "EMBRASURE_SQLGLOT_PATH does not contain a SQLGlot package: {}",
+            path.display()
+        );
+    }
+
+    let Ok(executable) = env::current_exe() else {
+        return Ok(None);
+    };
+    let executable = executable.canonicalize().unwrap_or(executable);
+    let Some(bin_dir) = executable.parent() else {
+        return Ok(None);
+    };
+    find_bundled_sqlglot(bin_dir)
+}
+
+fn find_bundled_sqlglot(bin_dir: &Path) -> Result<Option<PathBuf>> {
+    let mut candidates = vec![bin_dir.join(".embrasure/python")];
+    if let Some(prefix) = bin_dir.parent() {
+        candidates.push(prefix.join("libexec/embrasure/python"));
+    }
+    candidates.push(bin_dir.join("python"));
+    for candidate in candidates {
+        if let Some(path) = find_sqlglot(&candidate)? {
+            return Ok(Some(path));
+        }
+        if candidate.is_dir() {
+            bail!(
+                "bundled SQLGlot package is missing from {}",
+                candidate.display()
+            );
+        }
+    }
+    Ok(None)
+}
+
+fn find_sqlglot(path: &Path) -> Result<Option<PathBuf>> {
+    if path.is_file() {
+        return Ok(path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| name.starts_with("sqlglot-") && name.ends_with(".whl"))
+            .map(|_| path.to_owned()));
+    }
+    if !path.is_dir() {
+        return Ok(None);
+    }
+    if path.join("sqlglot").is_dir() {
+        return Ok(Some(path.to_owned()));
+    }
+
+    let mut wheels = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let candidate = entry?.path();
+        if candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("sqlglot-") && name.ends_with(".whl"))
+        {
+            wheels.push(candidate);
+        }
+    }
+    wheels.sort();
+    match wheels.len() {
+        0 => Ok(None),
+        1 => Ok(wheels.pop()),
+        _ => bail!(
+            "more than one bundled SQLGlot wheel was found in {}",
+            path.display()
+        ),
+    }
 }
 
 enum SourceResolution<'a> {
@@ -290,6 +378,66 @@ mod tests {
             exposures: BTreeMap::new(),
             child_map: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn bundled_sqlglot_accepts_a_wheel_or_package_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let wheel = directory.path().join("sqlglot-30.7.0-py3-none-any.whl");
+        std::fs::write(&wheel, []).unwrap();
+        assert_eq!(find_sqlglot(directory.path()).unwrap(), Some(wheel.clone()));
+        assert_eq!(find_sqlglot(&wheel).unwrap(), Some(wheel));
+
+        std::fs::remove_file(directory.path().join("sqlglot-30.7.0-py3-none-any.whl")).unwrap();
+        std::fs::create_dir(directory.path().join("sqlglot")).unwrap();
+        assert_eq!(
+            find_sqlglot(directory.path()).unwrap(),
+            Some(directory.path().to_owned())
+        );
+    }
+
+    #[test]
+    fn bundled_sqlglot_rejects_ambiguous_wheels() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("sqlglot-30.6.0-py3-none-any.whl"), []).unwrap();
+        std::fs::write(directory.path().join("sqlglot-30.7.0-py3-none-any.whl"), []).unwrap();
+        assert!(
+            find_sqlglot(directory.path())
+                .unwrap_err()
+                .to_string()
+                .contains("more than one")
+        );
+    }
+
+    #[test]
+    fn bundled_sqlglot_finds_release_installer_and_homebrew_layouts() {
+        for relative in [
+            "bin/python",
+            "bin/.embrasure/python",
+            "libexec/embrasure/python",
+        ] {
+            let prefix = tempfile::tempdir().unwrap();
+            let bin = prefix.path().join("bin");
+            let python = prefix.path().join(relative);
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(&python).unwrap();
+            let wheel = python.join("sqlglot-30.7.0-py3-none-any.whl");
+            std::fs::write(&wheel, []).unwrap();
+            assert_eq!(find_bundled_sqlglot(&bin).unwrap(), Some(wheel));
+        }
+    }
+
+    #[test]
+    fn bundled_sqlglot_reports_an_incomplete_install() {
+        let prefix = tempfile::tempdir().unwrap();
+        let bin = prefix.path().join("bin");
+        std::fs::create_dir_all(bin.join(".embrasure/python")).unwrap();
+        assert!(
+            find_bundled_sqlglot(&bin)
+                .unwrap_err()
+                .to_string()
+                .contains("bundled SQLGlot package is missing")
+        );
     }
 
     #[test]

@@ -26,7 +26,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - run: python3 -m pip install "sqlglot>=30,<31"
+      - run: python3 -m pip install --require-hashes -r packaging/sqlglot-requirements.txt
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --locked
@@ -49,6 +49,9 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
       - name: Install Rust target
         shell: bash
         run: |
@@ -66,7 +69,30 @@ jobs:
           cp "target/${{ matrix.target }}/release/embrasure" "dist/${package}/embrasure"
           cp LICENSE NOTICE README.md SECURITY.md embrasure-check.example.yml "dist/${package}/"
           cp -R docs "dist/${package}/docs"
+          mkdir -p "dist/${package}/python"
+          python3 -m pip download \
+            --only-binary=:all: \
+            --no-deps \
+            --require-hashes \
+            --dest "dist/${package}/python" \
+            -r packaging/sqlglot-requirements.txt
+          test "$(find "dist/${package}/python" -maxdepth 1 -name 'sqlglot-*.whl' | wc -l | tr -d ' ')" = 1
           "dist/${package}/embrasure" --version | grep "embrasure ${version}"
+          set +e
+          "dist/${package}/embrasure" --config embrasure-check.example.yml doctor --read-only --json > "dist/${package}/doctor.json"
+          doctor_status="$?"
+          set -e
+          test "${doctor_status}" -eq 3
+          python3 - "dist/${package}/doctor.json" <<'PY'
+          import json
+          import sys
+
+          report = json.load(open(sys.argv[1], encoding="utf-8"))
+          sqlglot = next(check for check in report["checks"] if check["check"] == "sqlglot")
+          assert sqlglot["status"] == "pass", sqlglot
+          assert sqlglot["message"] == "SQLGlot 30.7.0", sqlglot
+          PY
+          rm "dist/${package}/doctor.json"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
           rm -rf "dist/${package}"
       - name: Upload release archive

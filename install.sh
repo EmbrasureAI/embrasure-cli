@@ -44,6 +44,7 @@ if [ "$actual" != "$expected" ]; then
   exit 1
 fi
 tar -xzf "${temporary}/${archive}" -C "$temporary"
+package="${temporary}/embrasure-${version}-${target}"
 
 if [ -n "${EMBRASURE_INSTALL_DIR:-}" ]; then
   install_dir="$EMBRASURE_INSTALL_DIR"
@@ -53,7 +54,21 @@ else
   install_dir="${HOME}/.local/bin"
 fi
 mkdir -p "$install_dir"
-install -m 755 "${temporary}/embrasure-${version}-${target}/embrasure" "${install_dir}/embrasure"
+
+set -- "${package}"/python/sqlglot-*.whl
+if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+  echo "embrasure: bundled SQLGlot package is missing or ambiguous" >&2
+  exit 1
+fi
+bundled_wheel="$1"
+
+python_dir="${install_dir}/.embrasure/python"
+mkdir -p "$python_dir"
+for old_wheel in "${python_dir}"/sqlglot-*.whl; do
+  [ -e "$old_wheel" ] && rm "$old_wheel"
+done
+install -m 644 "$bundled_wheel" "$python_dir/"
+install -m 755 "${package}/embrasure" "${install_dir}/embrasure"
 echo "Installed Embrasure ${version} to ${install_dir}/embrasure"
 
 case ":${PATH}:" in
