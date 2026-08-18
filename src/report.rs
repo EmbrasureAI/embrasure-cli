@@ -1,4 +1,4 @@
-use std::{fmt::Write as _, fs, path::Path};
+use std::{fmt::Write as _, fs, path::Path, time::Duration};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -425,58 +425,223 @@ impl Report {
         self.human_styled(verbose, &Style::plain())
     }
 
+    #[cfg_attr(not(feature = "cloud-demo"), allow(dead_code))]
     pub fn human_styled(&self, verbose: bool, style: &Style) -> String {
-        let label = match self.status {
-            Status::Pass => style.good("PASS"),
-            Status::Findings => style.bad("FINDINGS"),
-            Status::Incomplete => style.warn("INCOMPLETE"),
-            Status::ExecutionFailure => style.bad("EXECUTION FAILURE"),
+        self.human_styled_inner(verbose, style, None)
+    }
+
+    pub fn human_styled_with_elapsed(
+        &self,
+        verbose: bool,
+        style: &Style,
+        elapsed: Duration,
+    ) -> String {
+        self.human_styled_inner(verbose, style, Some(elapsed))
+    }
+
+    fn human_styled_inner(
+        &self,
+        verbose: bool,
+        style: &Style,
+        elapsed: Option<Duration>,
+    ) -> String {
+        let dry_run = self.notices.iter().any(|notice| notice.code == "dry_run");
+        let heading = match (self.status, dry_run) {
+            (Status::Pass, true) => style.good("✓ Validation plan ready"),
+            (Status::Pass, false) => style.good("✓ Safe to continue"),
+            (Status::Findings, _) => style.bad("× Findings need review"),
+            (Status::Incomplete, _) => style.warn("! Review incomplete"),
+            (Status::ExecutionFailure, _) => style.bad("× Review stopped"),
         };
-        let mut output = format!(
-            "embrasure: {label}\n{} selected · {} built · {} compared · {} query checks run · {} findings · {} coverage gaps\n{} impacted · {} validated · {} not validated\n",
-            self.summary.models_selected,
-            self.summary.models_built,
-            self.summary.models_compared,
-            self.summary.query_checks_run,
-            self.summary.findings,
-            self.summary.coverage_gaps,
-            self.validation_scope.impacted_models,
-            self.validation_scope.validated_models.len(),
-            self.validation_scope.skipped_models.len(),
-        );
-        self.write_human_findings(&mut output, verbose);
-        for gap in &self.coverage_gaps {
+        let explanation = match (self.status, dry_run) {
+            (Status::Pass, true) => "No schemas were created and no warehouse data was queried.",
+            (Status::Pass, false) if self.summary.models_selected == 0 => {
+                "No affected dbt models needed validation."
+            }
+            (Status::Pass, false) => "The change passed across every selected dbt model.",
+            (Status::Findings, _) => "Review the findings below before you merge.",
+            (Status::Incomplete, _) => "Some affected models or checks could not be validated.",
+            (Status::ExecutionFailure, _) => "The review stopped before validation finished.",
+        };
+        let mut output = format!("{heading}\n\n{explanation}\n");
+        let has_review_data = self.validation_scope.impacted_models > 0
+            || self.summary.models_selected > 0
+            || self.summary.query_checks_configured > 0
+            || !self.ci_schemas.is_empty();
+        if self.status != Status::ExecutionFailure || has_review_data {
+            output.push_str("\nScope\n");
             let _ = writeln!(
                 output,
-                "- [unknown:{}] {}: {}",
-                gap.check, gap.scope, gap.reason
+                "  {} affected model{}",
+                self.validation_scope.impacted_models,
+                plural(self.validation_scope.impacted_models)
             );
+            let _ = writeln!(
+                output,
+                "  {} selected for validation",
+                self.summary.models_selected
+            );
+            if !self.impact.dbt_exposures.is_empty() {
+                let _ = writeln!(
+                    output,
+                    "  {} downstream exposure{}",
+                    self.impact.dbt_exposures.len(),
+                    plural(self.impact.dbt_exposures.len())
+                );
+            }
+            if !self.impact.metabase_dashboards.is_empty() {
+                let _ = writeln!(
+                    output,
+                    "  {} Metabase dashboard{}",
+                    self.impact.metabase_dashboards.len(),
+                    plural(self.impact.metabase_dashboards.len())
+                );
+            }
+
+            output.push_str(if dry_run { "\nPlan\n" } else { "\nEvidence\n" });
+            if dry_run {
+                let _ = writeln!(
+                    output,
+                    "  {} model build{} planned",
+                    self.summary.models_selected,
+                    plural(self.summary.models_selected)
+                );
+                if self.summary.query_checks_configured > 0 {
+                    let _ = writeln!(
+                        output,
+                        "  {} query check{} planned",
+                        self.summary.query_checks_configured,
+                        plural(self.summary.query_checks_configured)
+                    );
+                }
+            } else {
+                let _ = writeln!(
+                    output,
+                    "  {} / {} models built · {} compared with production",
+                    self.summary.models_built,
+                    self.summary.models_selected,
+                    self.summary.models_compared
+                );
+                let candidate_rows = self
+                    .models
+                    .iter()
+                    .filter_map(|model| model.comparison.as_ref())
+                    .map(|comparison| comparison.ci_row_count)
+                    .fold(0u64, u64::saturating_add);
+                if self.summary.models_compared > 0 {
+                    let _ = writeln!(
+                        output,
+                        "  {} candidate rows evaluated",
+                        format_count(candidate_rows)
+                    );
+                    output.push_str(
+                        "  Schema, row counts, nulls, cardinality, and distributions checked\n",
+                    );
+                    let primary_keys = self
+                        .models
+                        .iter()
+                        .filter_map(|model| model.comparison.as_ref())
+                        .filter(|comparison| comparison.primary_key.is_some())
+                        .count();
+                    if primary_keys > 0 {
+                        let _ = writeln!(
+                            output,
+                            "  {} primary key{} checked",
+                            primary_keys,
+                            plural(primary_keys)
+                        );
+                    }
+                }
+                if self.summary.query_checks_configured > 0 {
+                    let _ = writeln!(
+                        output,
+                        "  {} / {} query checks passed",
+                        self.summary.query_checks_passed, self.summary.query_checks_configured
+                    );
+                }
+                let _ = writeln!(
+                    output,
+                    "  {} finding{} · {} unvalidated model{}",
+                    self.summary.findings,
+                    plural(self.summary.findings),
+                    self.validation_scope.skipped_models.len(),
+                    plural(self.validation_scope.skipped_models.len())
+                );
+                if !self.ci_schemas.is_empty() {
+                    let cleaned = self
+                        .ci_schemas
+                        .iter()
+                        .filter(|schema| schema.cleaned_up)
+                        .count();
+                    if cleaned == self.ci_schemas.len() {
+                        let _ = writeln!(
+                            output,
+                            "  Temporary Snowflake schema{} removed",
+                            plural(self.ci_schemas.len())
+                        );
+                    } else {
+                        let _ = writeln!(
+                            output,
+                            "  {cleaned} / {} temporary Snowflake schemas removed",
+                            self.ci_schemas.len()
+                        );
+                    }
+                }
+            }
+        }
+
+        if !self.findings.is_empty() {
+            output.push_str("\nFindings\n");
+            self.write_human_findings(&mut output, verbose);
+        }
+        if !self.coverage_gaps.is_empty() {
+            output.push_str("\nScope limitations\n");
+        }
+        for gap in &self.coverage_gaps {
+            let _ = writeln!(output, "  [{}] {}: {}", gap.check, gap.scope, gap.reason);
+        }
+        if !self.execution_errors.is_empty() {
+            output.push_str("\nErrors\n");
         }
         for error in &self.execution_errors {
-            let _ = writeln!(output, "- [error] {error}");
+            let _ = writeln!(output, "  {error}");
         }
-        for check in &self.query_checks {
-            let _ = writeln!(
-                output,
-                "- [query:{:?}] {} ({}): {}",
-                check.status,
-                check.name,
-                check.account,
-                check.reason.as_deref().unwrap_or("comparison complete")
-            );
+        let visible_query_checks = self.query_checks.iter().filter(|check| {
+            verbose
+                || !matches!(
+                    check.status,
+                    QueryCheckStatus::Pass | QueryCheckStatus::Skipped
+                )
+        });
+        let query_checks = visible_query_checks.collect::<Vec<_>>();
+        if !query_checks.is_empty() {
+            output.push_str("\nQuery checks\n");
+            for check in query_checks {
+                let _ = writeln!(
+                    output,
+                    "  [{:?}] {} ({}): {}",
+                    check.status,
+                    check.name,
+                    check.account,
+                    check.reason.as_deref().unwrap_or("comparison complete")
+                );
+            }
         }
         let visible_notices = if verbose { self.notices.len() } else { 3 };
+        if visible_notices > 0 && !self.notices.is_empty() {
+            output.push_str("\nNotes\n");
+        }
         for notice in self.notices.iter().take(visible_notices) {
             let _ = writeln!(
                 output,
-                "- [note:{}] {}: {}",
+                "  [{}] {}: {}",
                 notice.code, notice.scope, notice.message
             );
         }
         if self.notices.len() > visible_notices {
             let _ = writeln!(
                 output,
-                "- {} more notices; rerun with --verbose",
+                "  {} more notices; rerun with --verbose",
                 self.notices.len() - visible_notices
             );
         }
@@ -484,7 +649,7 @@ impl Report {
             for skipped in &self.validation_scope.skipped_models {
                 let _ = writeln!(
                     output,
-                    "- [not-validated] {}: {}",
+                    "  [not-validated] {}: {}",
                     skipped.id, skipped.reason
                 );
             }
@@ -494,7 +659,7 @@ impl Report {
                 if let Some(comparison) = &model.comparison {
                     let _ = writeln!(
                         output,
-                        "- [evidence] {}: {} CI rows vs {} production rows across {} columns",
+                        "  [model] {}: {} candidate rows vs {} production rows across {} columns",
                         model.unique_id,
                         comparison.ci_row_count,
                         comparison.production_row_count,
@@ -503,7 +668,10 @@ impl Report {
                 }
             }
         }
-        self.write_human_lineage(&mut output, verbose);
+        if !self.impact.dbt_models.is_empty() || !self.impact.dbt_exposures.is_empty() {
+            output.push('\n');
+            self.write_human_lineage(&mut output, verbose);
+        }
         if !self.impact.dbt_lineage_changes.is_empty() {
             output.push_str("Lineage changes\n");
             for change in &self.impact.dbt_lineage_changes {
@@ -547,14 +715,13 @@ impl Report {
             }
         }
         for asset in &self.impact.metabase_dashboards {
-            let _ = writeln!(output, "- [impact:metabase] {}", asset.name);
+            let _ = writeln!(output, "  Metabase: {}", asset.name);
         }
         for edge in &self.impact.cross_account_dependencies {
-            let _ = writeln!(
-                output,
-                "- [impact:cross-account] {} -> {}",
-                edge.from, edge.to
-            );
+            let _ = writeln!(output, "  Cross-account: {} -> {}", edge.from, edge.to);
+        }
+        if let Some(elapsed) = elapsed {
+            let _ = writeln!(output, "\nCompleted in {}", format_duration(elapsed));
         }
         output
     }
@@ -1215,6 +1382,42 @@ fn markdown_option(value: Option<&str>) -> String {
     value.map(markdown_cell).unwrap_or_else(|| "—".into())
 }
 
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+fn format_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut output = String::with_capacity(digits.len() + digits.len() / 3);
+    let first_group = digits.len() % 3;
+    if first_group > 0 {
+        output.push_str(&digits[..first_group]);
+    }
+    for chunk in digits.as_bytes()[first_group..].chunks(3) {
+        if !output.is_empty() {
+            output.push(',');
+        }
+        output.push_str(std::str::from_utf8(chunk).expect("decimal digits are valid UTF-8"));
+    }
+    output
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!(
+            "{}h{:02}m{:02}s",
+            seconds / 3_600,
+            (seconds % 3_600) / 60,
+            seconds % 60
+        )
+    }
+}
+
 fn optional_number(value: Option<f64>) -> String {
     value
         .map(|number| format!("{number:.6}"))
@@ -1345,6 +1548,56 @@ mod tests {
         });
         report.finalize();
         assert_eq!(report.exit_code, EXIT_FINDINGS);
+    }
+
+    #[test]
+    fn human_report_leads_with_proof_and_omits_unconfigured_query_checks() {
+        let mut report = Report::empty("main".into(), Thresholds::default());
+        report.validation_scope.impacted_models = 1;
+        report.validation_scope.requested_models = 1;
+        report
+            .validation_scope
+            .validated_models
+            .push("primary:model.project.orders".into());
+        report.models.push(ModelReport {
+            unique_id: "model.project.orders".into(),
+            name: "orders".into(),
+            account: "primary".into(),
+            ci_relation: "DB.CI.ORDERS".into(),
+            production_relation: Some("DB.PROD.ORDERS".into()),
+            dbt_build: "passed".into(),
+            build_strategy: "standard".into(),
+            comparison: Some(ModelComparison {
+                ci_row_count: 150_410_994,
+                production_row_count: 150_410_994,
+                row_count_relative_change: 0.0,
+                columns: vec![],
+                primary_key: None,
+            }),
+        });
+        report.finalize();
+
+        let output = report.human(false);
+        assert!(output.starts_with("✓ Safe to continue"));
+        assert!(output.contains("1 / 1 models built · 1 compared with production"));
+        assert!(output.contains("150,410,994 candidate rows evaluated"));
+        assert!(!output.contains("query check"));
+    }
+
+    #[test]
+    fn dry_run_is_described_as_a_plan_not_a_pass() {
+        let mut report = Report::empty("main".into(), Thresholds::default());
+        report.notices.push(Notice {
+            scope: "validation".into(),
+            code: "dry_run".into(),
+            message: "planned validation without querying warehouse data".into(),
+        });
+        report.finalize();
+
+        let output = report.human(false);
+        assert!(output.starts_with("✓ Validation plan ready"));
+        assert!(output.contains("No schemas were created and no warehouse data was queried."));
+        assert!(!output.contains("Safe to continue"));
     }
 
     #[test]

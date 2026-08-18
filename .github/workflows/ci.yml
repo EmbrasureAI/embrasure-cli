@@ -45,5 +45,5 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install minimum supported Rust
-        run: rustup toolchain install 1.85 --profile minimal
-      - run: cargo +1.85 check --locked --all-targets
+        run: rustup toolchain install 1.88 --profile minimal
+      - run: cargo +1.88 check --locked --all-targets

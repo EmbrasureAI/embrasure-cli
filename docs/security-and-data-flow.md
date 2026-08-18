@@ -73,6 +73,8 @@ Incremental baselines use Snowflake table-level zero-copy clones. Embrasure neve
 
 Each run uses unique candidate and baseline schema names and writes an ownership marker to every schema. Cleanup requires both the exact run namespace and matching marker. The CLI refuses to drop a schema that fails either check.
 
+Schemas are dropped with `RESTRICT` instead of the Snowflake `CASCADE` default, so cleanup never removes foreign keys held by objects outside the schema. Because `RESTRICT` only warns, the CLI confirms the schema is gone before reporting it as removed.
+
 Cleanup is attempted after success, findings, execution failures, Ctrl-C, and normal termination signals. No process can clean up after `SIGKILL`, a machine crash, or power loss. `embrasure clean` lists old marked schemas by default and removes them only with `--yes`. It searches only each configured account database and verifies both the configured prefix and an Embrasure ownership marker before removal.
 
 ## Release integrity

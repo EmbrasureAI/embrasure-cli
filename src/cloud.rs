@@ -539,17 +539,17 @@ pub async fn status(run_id: Option<&str>) -> Result<Value> {
 }
 
 pub async fn logout() -> Result<()> {
-    if let Ok(session) = load_session() {
-        if let Ok(client) = update::http_client() {
-            let _ = client
-                .post(format!(
-                    "{}/v1/auth/session/revoke",
-                    session.api_base_url.trim_end_matches('/')
-                ))
-                .json(&json!({"refresh_token": session.refresh_token}))
-                .send()
-                .await;
-        }
+    if let Ok(session) = load_session()
+        && let Ok(client) = update::http_client()
+    {
+        let _ = client
+            .post(format!(
+                "{}/v1/auth/session/revoke",
+                session.api_base_url.trim_end_matches('/')
+            ))
+            .json(&json!({"refresh_token": session.refresh_token}))
+            .send()
+            .await;
     }
     match keychain()?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -561,16 +561,16 @@ pub async fn logout() -> Result<()> {
 }
 
 async fn valid_session() -> Result<CloudSession> {
-    if let Ok(access_token) = env::var("EMBRASURE_CLOUD_TOKEN") {
-        if !access_token.trim().is_empty() {
-            return Ok(CloudSession {
-                access_token,
-                refresh_token: String::new(),
-                expires_at: "9999-12-31T23:59:59Z".into(),
-                workspace_id: env::var("EMBRASURE_CLOUD_WORKSPACE_ID").unwrap_or_default(),
-                api_base_url: api_base_url(),
-            });
-        }
+    if let Ok(access_token) = env::var("EMBRASURE_CLOUD_TOKEN")
+        && !access_token.trim().is_empty()
+    {
+        return Ok(CloudSession {
+            access_token,
+            refresh_token: String::new(),
+            expires_at: "9999-12-31T23:59:59Z".into(),
+            workspace_id: env::var("EMBRASURE_CLOUD_WORKSPACE_ID").unwrap_or_default(),
+            api_base_url: api_base_url(),
+        });
     }
     let session =
         load_session().context("not signed in to Embrasure Cloud; run `embrasure cloud login`")?;

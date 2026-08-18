@@ -11,6 +11,7 @@ mod init;
 mod lineage;
 mod loopback;
 mod metabase;
+mod progress;
 mod query;
 mod report;
 mod run;
@@ -18,7 +19,7 @@ mod snowflake;
 mod style;
 mod update;
 
-use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
+use std::{io::IsTerminal, path::PathBuf, process::ExitCode, time::Instant};
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
@@ -300,6 +301,9 @@ async fn main() -> ExitCode {
             #[cfg(feature = "cloud-demo")]
             context_file,
         } => {
+            let check_started = Instant::now();
+            let progress_display = progress::Display::start(&base, json, dry_run);
+            let progress_active = progress_display.is_some();
             #[cfg(feature = "cloud-demo")]
             let use_cloud = cloud;
             let options = run::CheckOptions {
@@ -308,6 +312,7 @@ async fn main() -> ExitCode {
                 critical_tags: (!critical_tags.is_empty()).then_some(critical_tags),
                 incremental_mode: incremental_mode.map(Into::into),
                 select,
+                progress: progress_display.as_ref().map(progress::Display::reporter),
             };
             let loaded_config = run::load_config(&config, &options);
 
@@ -355,7 +360,9 @@ async fn main() -> ExitCode {
                         }
                     }
                 } else {
-                    eprintln!("embrasure: validating changes against {base}");
+                    if !progress_active {
+                        eprintln!("embrasure: validating changes against {base}");
+                    }
                     match loaded_config {
                         Ok(config) => {
                             run::run_check_with_config(config, &base, &options, dry_run).await
@@ -363,17 +370,19 @@ async fn main() -> ExitCode {
                         Err(error) => run::failed_check(&base, error),
                     }
                 };
-                if let Some(snapshot) = &snapshot {
-                    if let Err(error) = cloud::save_review(snapshot, &report) {
-                        eprintln!("embrasure: could not save the local review cache: {error:#}");
-                    }
+                if let Some(snapshot) = &snapshot
+                    && let Err(error) = cloud::save_review(snapshot, &report)
+                {
+                    eprintln!("embrasure: could not save the local review cache: {error:#}");
                 }
                 (intent, snapshot, report)
             };
 
             #[cfg(not(feature = "cloud-demo"))]
             let mut report = {
-                eprintln!("embrasure: validating changes against {base}");
+                if !progress_active {
+                    eprintln!("embrasure: validating changes against {base}");
+                }
                 match loaded_config {
                     Ok(config) => {
                         run::run_check_with_config(config, &base, &options, dry_run).await
@@ -381,15 +390,19 @@ async fn main() -> ExitCode {
                     Err(error) => run::failed_check(&base, error),
                 }
             };
-            if let Some(path) = markdown {
-                if let Err(error) = report.write_markdown(&path) {
-                    report
-                        .execution_errors
-                        .push(format!("could not write Markdown report: {error:#}"));
-                    report.finalize();
-                }
+            if let Some(path) = markdown
+                && let Err(error) = report.write_markdown(&path)
+            {
+                report
+                    .execution_errors
+                    .push(format!("could not write Markdown report: {error:#}"));
+                report.finalize();
             }
             let report_version = report_version.unwrap_or(report::ReportVersion::V4);
+
+            if let Some(display) = progress_display {
+                display.finish(&report);
+            }
 
             #[cfg(feature = "cloud-demo")]
             if use_cloud {
@@ -452,7 +465,14 @@ async fn main() -> ExitCode {
                 }
                 ExitCode::from(report.exit_code)
             } else {
-                print!("{}", report.human_styled(verbose, &style::Style::stdout()));
+                print!(
+                    "{}",
+                    report.human_styled_with_elapsed(
+                        verbose,
+                        &style::Style::stdout(),
+                        check_started.elapsed(),
+                    )
+                );
                 ExitCode::from(report.exit_code)
             }
         }

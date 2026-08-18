@@ -2,7 +2,7 @@
 name = "embrasure-cli"
 version = "0.5.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Embrasure CLI for validating dbt changes against production Snowflake data"
 license = "Apache-2.0"
 repository = "https://github.com/EmbrasureAI/embrasure-cli"
@@ -30,6 +30,7 @@ directories = "6.0"
 keyring = { version = "3.6", optional = true }
 openssl = { version = "0.10", features = ["vendored"] }
 rand = "0.8"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

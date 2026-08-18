@@ -69,18 +69,18 @@ pub async fn doctor_notice() -> Option<String> {
     {
         return None;
     }
-    if let Ok(cache) = read_cache() {
-        if cache_is_fresh(&cache.checked_at) {
-            return is_newer(&cache.latest, env!("CARGO_PKG_VERSION"))
-                .ok()
-                .filter(|newer| *newer)
-                .map(|_| {
-                    format!(
-                        "Embrasure {} is available; run `embrasure update`.",
-                        cache.latest
-                    )
-                });
-        }
+    if let Ok(cache) = read_cache()
+        && cache_is_fresh(&cache.checked_at)
+    {
+        return is_newer(&cache.latest, env!("CARGO_PKG_VERSION"))
+            .ok()
+            .filter(|newer| *newer)
+            .map(|_| {
+                format!(
+                    "Embrasure {} is available; run `embrasure update`.",
+                    cache.latest
+                )
+            });
     }
     let latest = latest_version().await.ok()?;
     let _ = write_cache(&UpdateCache {
