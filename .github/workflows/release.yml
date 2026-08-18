@@ -132,9 +132,16 @@ jobs:
       - name: Generate checksums
         run: cd dist && sha256sum -- *.tar.gz *.spdx.json > SHA256SUMS
       - name: Attest build provenance
+        id: provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: dist/SHA256SUMS
+      - name: Stage build provenance
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          test -s "${PROVENANCE_BUNDLE}"
+          cp "${PROVENANCE_BUNDLE}" "dist/embrasure-${GITHUB_REF_NAME}.intoto.jsonl"
       - name: Attest SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
