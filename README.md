@@ -58,10 +58,33 @@ Use Embrasure from an existing Snowflake dbt project whose unchanged production 
 Example result:
 
 ```text
-embrasure: PASS
-2 selected · 2 built · 2 compared · 0 query checks run · 0 findings · 0 coverage gaps
-5 impacted · 2 validated · 3 not validated
+✓ Safe to continue
+
+The change passed across every selected dbt model.
+
+Scope
+  5 affected models
+  2 selected for validation
+
+Evidence
+  2 / 2 models built · 2 compared with production
+  151,615,312 candidate rows evaluated
+  Schema, row counts, nulls, cardinality, and distributions checked
+  1 primary key checked
+  0 findings · 3 unvalidated models
+  Temporary Snowflake schema removed
+
+Lineage impact
+  fct_orders
+  └─ finance_daily
+     ├─ executive_revenue
+     ├─ regional_margin
+     └─ revenue_forecast_input
+
+Completed in 2m11s
 ```
+
+In an interactive terminal, `check` shows live progress while it runs. Redirected output, CI, and `--json` stay plain.
 
 ## Focus and preview
 
@@ -229,7 +252,7 @@ Every temporary schema has a unique name and ownership marker. Query results are
 
 ## Development
 
-Rust 1.85 or newer is required when building from source.
+Rust 1.88 or newer is required when building from source.
 
 ```sh
 cargo fmt --check
