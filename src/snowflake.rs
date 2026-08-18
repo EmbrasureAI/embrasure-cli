@@ -250,19 +250,7 @@ impl SnowflakeClient {
         if !is_managed_schema(schema, run_schema) {
             bail!("refusing to drop schema {schema}: it is not owned by this run ({run_schema})");
         }
-        let ownership = self
-            .execute(&format!(
-                "SELECT COMMENT FROM {}.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = {}",
-                quote_identifier(database),
-                quote_string(schema),
-            ))
-            .await?;
-        let Some(comment) = ownership
-            .rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(Option::as_deref)
-        else {
+        let Some(comment) = self.schema_comment(database, schema).await? else {
             return Ok(());
         };
         let expected = self.schema_ownership_marker();
@@ -271,13 +259,7 @@ impl SnowflakeClient {
                 "refusing to drop schema {database}.{schema}: its ownership marker does not match this run"
             );
         }
-        self.execute(&format!(
-            "DROP SCHEMA IF EXISTS {}.{}",
-            quote_identifier(database),
-            quote_identifier(schema),
-        ))
-        .await?;
-        Ok(())
+        self.drop_schema_restricted(database, schema).await
     }
 
     pub async fn drop_marked_schema(
@@ -289,6 +271,18 @@ impl SnowflakeClient {
         if !crate::clean::is_managed_prefix(schema, prefix) {
             bail!("refusing to drop schema {schema}: it is outside the managed prefix {prefix}");
         }
+        let Some(comment) = self.schema_comment(database, schema).await? else {
+            return Ok(());
+        };
+        if crate::clean::parse_ownership_marker(&comment).is_none() {
+            bail!(
+                "refusing to drop schema {database}.{schema}: its Embrasure ownership marker is invalid"
+            );
+        }
+        self.drop_schema_restricted(database, schema).await
+    }
+
+    async fn schema_comment(&self, database: &str, schema: &str) -> Result<Option<String>> {
         let ownership = self
             .execute(&format!(
                 "SELECT COMMENT FROM {}.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = {}",
@@ -296,25 +290,25 @@ impl SnowflakeClient {
                 quote_string(schema),
             ))
             .await?;
-        let Some(comment) = ownership
+        Ok(ownership
             .rows
             .first()
             .and_then(|row| row.first())
-            .and_then(Option::as_deref)
-        else {
-            return Ok(());
-        };
-        if crate::clean::parse_ownership_marker(comment).is_none() {
+            .cloned()
+            .flatten())
+    }
+
+    /// Snowflake defaults `DROP SCHEMA` to `CASCADE`, which also drops foreign keys elsewhere that
+    /// reference the schema. `RESTRICT` leaves those references intact but only warns, so the drop
+    /// is confirmed before the schema is reported as removed.
+    async fn drop_schema_restricted(&self, database: &str, schema: &str) -> Result<()> {
+        self.execute(&drop_schema_statement(database, schema))
+            .await?;
+        if self.schema_comment(database, schema).await?.is_some() {
             bail!(
-                "refusing to drop schema {database}.{schema}: its Embrasure ownership marker is invalid"
+                "could not drop schema {database}.{schema}: foreign keys outside the schema still reference it; drop those constraints or the schema manually"
             );
         }
-        self.execute(&format!(
-            "DROP SCHEMA IF EXISTS {}.{}",
-            quote_identifier(database),
-            quote_identifier(schema),
-        ))
-        .await?;
         Ok(())
     }
 
@@ -350,6 +344,14 @@ impl SnowflakeClient {
 
 fn clone_table_statement(source: &Relation, target: &Relation) -> String {
     format!("CREATE TABLE {} CLONE {}", target.sql(), source.sql())
+}
+
+fn drop_schema_statement(database: &str, schema: &str) -> String {
+    format!(
+        "DROP SCHEMA IF EXISTS {}.{} RESTRICT",
+        quote_identifier(database),
+        quote_identifier(schema),
+    )
 }
 
 fn statement_body(
@@ -554,6 +556,14 @@ mod tests {
             }
             .sql(),
             "\"D\".\"S\".\"T\""
+        );
+    }
+
+    #[test]
+    fn cleanup_never_cascades_into_objects_outside_the_schema() {
+        assert_eq!(
+            drop_schema_statement("ANALYTICS", "EMBRASURE_CHECK_RUN"),
+            "DROP SCHEMA IF EXISTS \"ANALYTICS\".\"EMBRASURE_CHECK_RUN\" RESTRICT"
         );
     }
 
