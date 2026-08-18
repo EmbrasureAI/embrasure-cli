@@ -145,6 +145,48 @@ fn doctor_returns_execution_failure_for_a_missing_config() {
 }
 
 #[test]
+fn missing_dbt_check_preserves_json_and_exit_code() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("embrasure-check.yml"),
+        r#"version: 1
+dbt:
+  project_dir: .
+  profile: analytics
+  command: missing-dbt-for-embrasure-test
+accounts:
+  - name: primary
+    account: org-account
+    user: validator
+    role: validator
+    database: analytics
+    warehouse: dbt_ci
+    production_schema: prod
+    auth: { type: programmatic_access_token, token_env: UNUSED_TOKEN }
+"#,
+    )
+    .unwrap();
+
+    let assertion = Command::cargo_bin("embrasure")
+        .unwrap()
+        .current_dir(directory.path())
+        .env("SHELL", "/bin/zsh")
+        .args(["check", "--json"])
+        .assert()
+        .code(3);
+    let stdout = std::str::from_utf8(&assertion.get_output().stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(stdout).unwrap();
+    assert_eq!(report["exit_code"], 3);
+    assert!(report["ci_schemas"].as_array().unwrap().is_empty());
+    let error = report["execution_errors"][0].as_str().unwrap();
+    assert!(error.contains("detected shell: zsh"));
+    assert!(error.contains("Install dbt Core and dbt-snowflake"));
+    assert!(error.contains("~/.zshrc"));
+    assert!(error.contains("missing-dbt-for-embrasure-test --version"));
+    assert!(!error.contains("No such file or directory"));
+}
+
+#[test]
 fn run_remains_an_alias_for_check() {
     Command::cargo_bin("embrasure")
         .unwrap()
