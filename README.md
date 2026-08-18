@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center"><sub><em>An embrasure is an opening in a fortified wall, built to see and respond without giving up protection.</em></sub></p>
+<p align="center"><sub><em>“An embrasure is an opening in a fortified wall, built to see and respond without giving up protection.”</em></sub></p>
 
 <p align="center">
   <a href="https://github.com/EmbrasureAI/embrasure-cli/actions/workflows/github-code-scanning/codeql"><img src="https://github.com/EmbrasureAI/embrasure-cli/actions/workflows/github-code-scanning/codeql/badge.svg" alt="CodeQL"></a>
