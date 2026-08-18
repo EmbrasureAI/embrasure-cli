@@ -103,6 +103,7 @@ async fn execute(
     dry_run: bool,
     report: &mut Report,
 ) -> Result<()> {
+    dbt::verify_executable(&config.dbt.command)?;
     let resolved_auth = if dry_run {
         config
             .accounts

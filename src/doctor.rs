@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     auth,
     config::Config,
-    lineage, metabase,
+    dbt, lineage, metabase,
     snowflake::{QueryResult, Relation, SnowflakeClient, quote_identifier},
     style::Style,
 };
@@ -52,7 +52,7 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
         return report;
     }
     report.tool("git", "git");
-    report.tool("dbt", &config.dbt.command);
+    report.dbt_tool(&config.dbt.command);
     match lineage::probe() {
         Ok(version) => report.pass("local", "sqlglot", format!("SQLGlot {version}")),
         Err(error) => report.fail("local", "sqlglot", format!("{error:#}")),
@@ -341,6 +341,13 @@ impl DoctorReport {
                 format!("{command} --version exited {}", output.status),
             ),
             Err(error) => self.fail("local", name, format!("could not run {command}: {error}")),
+        }
+    }
+
+    fn dbt_tool(&mut self, command: &str) {
+        match dbt::verify_executable(command) {
+            Ok(version) => self.pass("local", "dbt", version),
+            Err(error) => self.fail("local", "dbt", error.to_string()),
         }
     }
 

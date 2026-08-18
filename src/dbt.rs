@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -19,6 +19,81 @@ use crate::{
     git,
     report::{ImpactReport, ImpactedAsset, LineageChange, LineageChangeKind, LineageEdge},
 };
+
+pub fn verify_executable(command: &str) -> Result<String> {
+    verify_executable_for_shell(command, &detected_shell())
+}
+
+fn verify_executable_for_shell(command: &str, shell: &str) -> Result<String> {
+    let output = match Command::new(command).arg("--version").output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "dbt executable `{command}` was not found (detected shell: {shell}). Install dbt Core and dbt-snowflake with your project's package manager and activate that environment, or {}. Verify with `{command} --version`.",
+                path_instruction(shell),
+            );
+        }
+        Err(error) => {
+            bail!(
+                "dbt executable `{command}` could not be started (detected shell: {shell}): {error}. Check `dbt.command`, file permissions, and PATH, then run `{command} --version`.",
+            );
+        }
+    };
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(if output.stderr.is_empty() {
+            &output.stdout
+        } else {
+            &output.stderr
+        });
+        let detail = detail.trim().replace(['\r', '\n'], " ");
+        let detail = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", truncate(&detail, 240))
+        };
+        bail!(
+            "dbt executable `{command}` is not usable: `{command} --version` exited {}{detail}. Check `dbt.command` and the active dbt environment.",
+            output.status,
+        );
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if version.is_empty() {
+        Ok(format!("{command} --version succeeded"))
+    } else {
+        Ok(version)
+    }
+}
+
+fn detected_shell() -> String {
+    let shell = env::var_os("SHELL").unwrap_or_default();
+    Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+        })
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
+fn path_instruction(shell: &str) -> &'static str {
+    match shell {
+        "zsh" => "add dbt's bin directory to PATH in `~/.zshrc`",
+        "bash" => "add dbt's bin directory to PATH in `~/.bashrc`",
+        "fish" => "add dbt's bin directory with `fish_add_path`",
+        _ => "add dbt's bin directory to PATH in your shell configuration",
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
@@ -1335,6 +1410,62 @@ mod tests {
     #[test]
     fn malformed_dbt_ls_output_is_not_silently_ignored() {
         assert!(unique_ids("not-json").is_err());
+    }
+
+    #[test]
+    fn missing_dbt_executable_has_an_actionable_shell_hint() {
+        let command = format!("missing-dbt-{}", uuid::Uuid::new_v4());
+        let error = verify_executable_for_shell(&command, "zsh")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("dbt executable `{command}` was not found")));
+        assert!(error.contains("detected shell: zsh"));
+        assert!(error.contains("Install dbt Core and dbt-snowflake"));
+        assert!(error.contains("~/.zshrc"));
+        assert!(error.contains(&format!("{command} --version")));
+        assert!(!error.contains("No such file or directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_dbt_executable_reports_the_version_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let command = executable_script(
+            directory.path(),
+            "invalid-dbt",
+            "#!/bin/sh\necho 'broken dbt environment' >&2\nexit 42\n",
+        );
+        let error = verify_executable_for_shell(command.to_str().unwrap(), "bash")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is not usable"));
+        assert!(error.contains("broken dbt environment"));
+        assert!(error.contains("42"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn working_dbt_executable_returns_its_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let command = executable_script(
+            directory.path(),
+            "working-dbt",
+            "#!/bin/sh\nprintf 'Core:\\n  - installed: 1.10.0\\n'\n",
+        );
+        let version = verify_executable_for_shell(command.to_str().unwrap(), "fish").unwrap();
+        assert_eq!(version, "Core: - installed: 1.10.0");
+    }
+
+    #[cfg(unix)]
+    fn executable_script(directory: &Path, name: &str, contents: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = directory.join(name);
+        fs::write(&path, contents).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        path
     }
 
     #[test]
