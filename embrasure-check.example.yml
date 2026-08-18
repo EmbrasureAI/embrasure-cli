@@ -1,0 +1,117 @@
+version: 1
+
+dbt:
+  project_dir: .
+  profile: analytics
+  # Optional executable or wrapper. The default is dbt.
+  # command: dbt
+  # Optional. Without this, a production manifest is generated from --base.
+  # state_dir: target/production-artifacts
+  threads: 4
+
+safety:
+  schema_prefix: EMBRASURE_CHECK
+  statement_timeout_seconds: 300
+  max_models: 25
+  max_columns_per_model: 100
+  primary_key_sample_limit: 20
+  max_query_checks: 20
+  max_example_value_chars: 512
+
+comparison:
+  # quick estimates cardinality and skips percentiles.
+  mode: deep
+  concurrency: 4
+  timeout_seconds: 900
+
+validation:
+  # critical is the default. Use all for complete downstream validation or none
+  # for changed models only. Full downstream impact is always reported.
+  downstream: critical
+  critical_tags: [critical]
+  # Existing incremental models start from zero-copy production clones.
+  incremental_mode: clone
+
+thresholds:
+  row_count_relative: 0.001
+  null_rate_absolute: 0.001
+  cardinality_relative: 0.001
+  numeric_relative: 0.001
+
+accounts:
+  - name: primary
+    account: your_org-your_account
+    user: DBT_CI
+    role: DBT_CI_ROLE
+    database: ANALYTICS
+    warehouse: DBT_CI_WH
+    production_schema: PROD
+    # Required when more than one account is configured. This is a dbt selector.
+    # selector: tag:primary_account
+    auth:
+      # Best for a developer or local agent. Run `embrasure auth login` once.
+      type: oauth_local
+
+  # A second Snowflake account can use its own non-interactive credential.
+  # - name: secondary
+  #   account: your_org-your_second_account
+  #   user: DBT_CI
+  #   role: DBT_CI_ROLE
+  #   database: ANALYTICS
+  #   warehouse: DBT_CI_WH
+  #   production_schema: PROD
+  #   selector: tag:secondary_account
+  #   auth:
+  #     type: programmatic_access_token
+  #     token_env: SECONDARY_SNOWFLAKE_PAT
+
+models:
+  # Keys may be dbt unique IDs or model names.
+  model.orders:
+    primary_key: [order_id]
+    # Fail if CI has any duplicate or null keys, even when production already does.
+    # key_policy: strict
+    # Select this model as a critical downstream target without adding a dbt tag.
+    # critical: true
+    # Override only the thresholds that are intentionally different for this model.
+    # thresholds:
+    #   row_count_relative: 0.05
+    # Optional: limit both CI and production scans for a large fact table.
+    # where: "order_date >= DATEADD(day, -30, CURRENT_DATE)"
+    # Set this only for an intentional deletion after checking reported impact.
+    # allow_removal: true
+
+# Optional exact comparisons for arbitrary read-only query results. production_sql
+# defaults to sql. ref()-free checks run on every invocation; checks with refs run
+# when any referenced model is impacted.
+checks:
+  - type: query_diff
+    name: paid order totals
+    sql: |
+      select customer_id, sum(amount) as paid_amount
+      from {{ ref('orders') }}
+      where status = 'paid'
+      group by customer_id
+    primary_key: [customer_id]
+    # account: primary # Required with multiple accounts.
+    # production_sql: |
+    #   select customer_id, sum(amount) as paid_amount
+    #   from {{ ref('legacy_orders') }}
+    #   where status = 'paid'
+    #   group by customer_id
+
+# Optional non-dbt changes that should invalidate dbt models.
+external_changes:
+  - path: warehouse/shared/**/*.sql
+    models: [model.analytics.orders]
+
+# Optional declared dependencies that dbt cannot see.
+cross_account_dependencies:
+  - from: model.analytics.orders
+    to: secondary:ANALYTICS.PROD.ORDER_EXPORT
+    columns: [order_id]
+
+# Optional, read-only Metabase impact lookup.
+# metabase:
+#   url: https://metabase.example.com
+#   api_key_env: METABASE_API_KEY

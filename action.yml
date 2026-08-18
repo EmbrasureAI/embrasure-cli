@@ -1,0 +1,21 @@
+name: Install Embrasure
+description: Install a verified Embrasure CLI release and add it to PATH.
+inputs:
+  version:
+    description: Release version without the leading v. Defaults to the latest release.
+    required: false
+    default: latest
+runs:
+  using: composite
+  steps:
+    - name: Install Embrasure
+      shell: bash
+      env:
+        EMBRASURE_VERSION_INPUT: ${{ inputs.version }}
+        EMBRASURE_INSTALL_DIR: ${{ runner.temp }}/embrasure/bin
+      run: |
+        if [[ "${EMBRASURE_VERSION_INPUT}" != "latest" ]]; then
+          export EMBRASURE_VERSION="${EMBRASURE_VERSION_INPUT}"
+        fi
+        "${GITHUB_ACTION_PATH}/install.sh"
+        echo "${EMBRASURE_INSTALL_DIR}" >> "${GITHUB_PATH}"
