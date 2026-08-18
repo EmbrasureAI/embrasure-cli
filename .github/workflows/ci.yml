@@ -12,8 +12,10 @@ jobs:
   action:
     runs-on: ubuntu-24.04
     steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install through the documented action
-        uses: EmbrasureAI/embrasure-cli@v1
+        uses: ./
       - name: Verify the installed CLI
         run: embrasure --version | grep '^embrasure '
 
