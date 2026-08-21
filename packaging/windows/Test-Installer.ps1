@@ -128,6 +128,17 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
     }
 }
 
+function Assert-UserPathRestored {
+    param([AllowEmptyString()][string]$Expected)
+
+    $actual = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $beforeWithoutTrailingSeparators = ([string]$Expected).TrimEnd(';')
+    $afterWithoutTrailingSeparators = ([string]$actual).TrimEnd(';')
+    if ($beforeWithoutTrailingSeparators -cne $afterWithoutTrailingSeparators) {
+        throw "Uninstall changed a neighboring user PATH entry. Before=<${Expected}> After=<${actual}>"
+    }
+}
+
 try {
     Invoke-Msi -Action '/i' -Path $BaseMsi -LogName 'install-passive.log' -Display '/passive'
     $cleanupMsi = $BaseMsi
@@ -136,10 +147,7 @@ try {
     Invoke-Msi -Action '/x' -Path $BaseMsi -LogName 'uninstall-passive.log'
     $cleanupMsi = $null
     if (Test-Path -LiteralPath $executable) { throw 'Passive-install uninstall left the executable behind.' }
-    $userPathAfterPassive = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($userPathAfterPassive -ne $userPathBefore) {
-        throw "Passive-install uninstall did not restore the original user PATH. Before=<${userPathBefore}> After=<${userPathAfterPassive}>"
-    }
+    Assert-UserPathRestored -Expected $userPathBefore
 
     Invoke-Msi -Action '/i' -Path $BaseMsi -LogName 'install-quiet.log'
     $cleanupMsi = $BaseMsi
@@ -179,10 +187,7 @@ try {
     if (Test-Path -LiteralPath $executable) { throw 'Uninstall left the executable behind.' }
     if (-not (Test-Path -LiteralPath $configSentinel)) { throw 'Uninstall removed user configuration.' }
     if (-not (Test-Path -LiteralPath $credentialSentinel)) { throw 'Uninstall removed cached credentials.' }
-    $userPathAfter = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($userPathAfter -ne $userPathBefore) {
-        throw "Uninstall did not restore the original user PATH. Before=<${userPathBefore}> After=<${userPathAfter}>"
-    }
+    Assert-UserPathRestored -Expected $userPathBefore
 }
 finally {
     if ((Test-Path -LiteralPath $executable) -and $null -ne $cleanupMsi) {
