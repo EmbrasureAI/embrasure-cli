@@ -100,7 +100,8 @@ jobs:
             -ArchiveSha256 (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash `
             -OutputDirectory $manifestRoot
           Get-Content -LiteralPath (Join-Path $manifestRoot 'scoop\embrasure.json') -Raw | ConvertFrom-Json | Out-Null
-          if (Get-ChildItem -LiteralPath $manifestRoot -Recurse -File | Select-String -Pattern '@[A-Z_]+@' -Quiet) {
+          $unresolvedTokens = @(Get-ChildItem -LiteralPath $manifestRoot -Recurse -File | Select-String -Pattern '@[A-Z_]+@')
+          if ($unresolvedTokens.Count -ne 0) {
             throw 'Generated package-manager manifests contain an unresolved token.'
           }
           New-Item -ItemType Directory -Path .\ci-windows-dist | Out-Null
