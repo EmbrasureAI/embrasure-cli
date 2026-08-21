@@ -19,6 +19,12 @@ foreach ($script in $scripts) {
     }
 }
 
+$updateSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\src\update.rs') -Raw
+if ($updateSource -notmatch '"-ExecutionPolicy",\s*\r?\n\s*"Bypass"' -or
+    $updateSource -match '"-ExecutionPolicy",\s*\r?\n\s*"AllSigned"') {
+    throw 'The internal update helper must use the verified non-interactive process policy.'
+}
+
 . (Join-Path $PSScriptRoot '..\..\install.ps1')
 
 $policyMessage = Get-WindowsInstallerFailureMessage -ExitCode 1625 -LogPath 'installer.log'

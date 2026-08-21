@@ -220,7 +220,11 @@ async fn windows_install(executable: &Path, version: &str) -> Result<String> {
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
-            "AllSigned",
+            // The helper and MSI are independently verified before this process starts,
+            // and the helper repeats both checks after the parent exits. AllSigned is not
+            // suitable here because a fresh machine prompts for an unclassified publisher,
+            // which makes a non-interactive update fail even when Authenticode is valid.
+            "Bypass",
             "-File",
         ])
         .arg(&installed_helper)
