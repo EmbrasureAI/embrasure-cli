@@ -94,7 +94,7 @@ Verify its GitHub-signed build provenance:
 gh attestation verify embrasure-*.tar.gz --repo EmbrasureAI/embrasure-cli
 ```
 
-On Windows, both `embrasure.exe` inside the MSI and the MSI itself are Authenticode-signed and RFC 3161 timestamped as `Embrasure, Inc.`. The signed `install.ps1` verifies its own publisher, the Microsoft Artifact Signing public-trust root, the exact checksum entry, and the MSI signature before invoking Windows Installer. `embrasure update` verifies the installed helper's signature, publisher, and trust root before launching it under a non-interactive process policy; the signed helper repeats those checks and revalidates the MSI hash and signature after the CLI exits. Windows Installer then provides replacement and rollback without forcing a reboot.
+On Windows, both `embrasure.exe` inside the MSI and the MSI itself are Authenticode-signed and RFC 3161 timestamped as `Embrasure, Inc.`. The signed `install.ps1` verifies its own publisher, the Microsoft Artifact Signing public-trust root, the exact checksum entry, and the MSI signature before invoking Windows Installer. `embrasure update` verifies the installed helper's signature, publisher, and trust root before launching it with a process-scoped `Bypass` policy, which avoids first-run publisher prompts without changing the user's or machine's execution policy. The signed helper repeats those checks and revalidates the MSI hash and signature after the CLI exits. Windows Installer then provides replacement and rollback without forcing a reboot.
 
 Release attestations use short-lived Sigstore-backed identities issued to the GitHub Actions release workflow. The source commit, workflow, and artifact digest are included in the verification result.
 
