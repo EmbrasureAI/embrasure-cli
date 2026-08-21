@@ -102,6 +102,7 @@ jobs:
           )) {
             $output = Join-Path $env:RUNNER_TEMP $fixture.Output
             dotnet build .\packaging\windows\Embrasure.wixproj `
+              --no-incremental `
               --configuration Release `
               --output $output `
               -p:ProductVersion=$($fixture.Version) `
