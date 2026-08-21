@@ -12,6 +12,8 @@ Windows ships as one portable x64 ZIP. The PowerShell installer, WinGet, Scoop, 
 
 The release workflow also publishes `install.ps1`, `SHA256SUMS`, an SPDX SBOM, GitHub build provenance, and generated WinGet/Scoop manifests. It does not require WiX, Azure, a signing certificate, elevation, services, tasks, shortcuts, or telemetry.
 
+The executable statically links the Microsoft C runtime, so users do not need to install the Visual C++ Redistributable separately. Python and dbt remain project-managed prerequisites.
+
 ## Package-manager publication
 
 After the GitHub release exists:

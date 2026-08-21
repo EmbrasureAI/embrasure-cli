@@ -26,3 +26,9 @@ foreach ($field in $expected.Keys) {
         throw "Invalid PE ${field}: '$($metadata.$field)' (expected '$($expected[$field])')."
     }
 }
+
+$binaryText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($BinaryPath))
+if ($binaryText -match '(?i)VCRUNTIME[0-9_]*\.dll' -or
+    $binaryText -match '(?i)api-ms-win-crt-[a-z0-9-]+\.dll') {
+    throw 'The portable Windows executable dynamically imports the Visual C++ runtime.'
+}
