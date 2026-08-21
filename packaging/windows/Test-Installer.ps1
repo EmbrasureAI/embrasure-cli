@@ -6,7 +6,10 @@ param(
 
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$')]
-    [string]$Version
+    [string]$Version,
+
+    [ValidateSet('WindowsPowerShell', 'PowerShell')]
+    [string]$InstallerEngine = 'WindowsPowerShell'
 )
 
 Set-StrictMode -Version 3.0
@@ -22,12 +25,16 @@ $archiveHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash
 $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $neighborBefore = Join-Path $testRoot 'neighbor-before'
 $neighborAfter = Join-Path $testRoot 'neighbor-after'
+$installerPowerShell = if ($InstallerEngine -eq 'PowerShell') {
+    (Get-Command pwsh.exe -ErrorAction Stop).Source
+} else {
+    Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+}
 
 function Invoke-InstallerProcess {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    & $powershell @Arguments
+    & $installerPowerShell @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "Installer process failed with exit code ${LASTEXITCODE}."
     }
@@ -104,8 +111,7 @@ try {
     try {
         $env:Path = $childPath
         $probe = 'embrasure.exe --version | Out-Null; if ($LASTEXITCODE -ne 0) { exit 1 }'
-        $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        & $powershell -NoLogo -NoProfile -NonInteractive -Command $probe
+        & $installerPowerShell -NoLogo -NoProfile -NonInteractive -Command $probe
         if ($LASTEXITCODE -ne 0) { throw 'A new PowerShell process could not run embrasure from PATH.' }
     }
     finally {
@@ -123,6 +129,7 @@ try {
         throw 'Same-version reinstall duplicated the PATH entry.'
     }
 
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $invalidArchive = Join-Path $testRoot 'invalid-layout.zip'
     $zip = [IO.Compression.ZipFile]::Open($invalidArchive, [IO.Compression.ZipArchiveMode]::Create)

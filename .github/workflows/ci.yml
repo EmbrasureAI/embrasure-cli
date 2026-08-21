@@ -88,7 +88,12 @@ jobs:
           Compress-Archive -LiteralPath $payload -DestinationPath $archive
           .\packaging\windows\Test-Installer.ps1 `
             -ArchivePath $archive `
-            -Version $version
+            -Version $version `
+            -InstallerEngine WindowsPowerShell
+          .\packaging\windows\Test-Installer.ps1 `
+            -ArchivePath $archive `
+            -Version $version `
+            -InstallerEngine PowerShell
           $manifestRoot = Join-Path $working 'package-manifests'
           .\packaging\windows\New-PackageManifests.ps1 `
             -Version $version `
@@ -98,6 +103,18 @@ jobs:
           if (Get-ChildItem -LiteralPath $manifestRoot -Recurse -File | Select-String -Pattern '@[A-Z_]+@' -Quiet) {
             throw 'Generated package-manager manifests contain an unresolved token.'
           }
+          New-Item -ItemType Directory -Path .\ci-windows-dist | Out-Null
+          Copy-Item -LiteralPath $archive -Destination .\ci-windows-dist
+          Copy-Item -LiteralPath .\install.ps1 -Destination .\ci-windows-dist
+          Compress-Archive `
+            -Path (Join-Path $manifestRoot '*') `
+            -DestinationPath ".\ci-windows-dist\embrasure-${version}-windows-package-manifests.zip"
+      - name: Upload Windows acceptance-test files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-acceptance-test
+          path: ci-windows-dist/*
+          if-no-files-found: error
 
   msrv:
     runs-on: ubuntu-24.04
@@ -106,4 +123,4 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install minimum supported Rust
         run: rustup toolchain install 1.88 --profile minimal
-      - run: cargo +1.88 check --locked --all-targets
+      - run: cargo +1.88 check --locked --all-targets --all-features

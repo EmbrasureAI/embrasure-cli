@@ -64,10 +64,12 @@ The same ZIP used by both package managers is available from GitHub Releases. Fo
 ```powershell
 $installer = Join-Path $env:TEMP 'embrasure-install.ps1'
 Invoke-WebRequest https://github.com/EmbrasureAI/embrasure-cli/releases/latest/download/install.ps1 -OutFile $installer
+Get-Content $installer
+Unblock-File $installer
 & $installer
 ```
 
-The script verifies the release checksum, installs under `%LOCALAPPDATA%\Programs\Embrasure`, and adds only its `bin` directory to the current-user `PATH`. It does not require elevation. Open a new terminal after installation. Use `& $installer -Version 0.5.3` for a pinned release, `-Quiet` for automation, or `-Uninstall` to remove the installed files and owned `PATH` entry. Configuration, credentials, reports, and logs are preserved on uninstall.
+`Unblock-File` marks the inspected download as trusted; it does not change PowerShell's execution policy. If organization policy still blocks the script, use WinGet, Scoop, or the portable ZIP. The script verifies the release checksum, installs under `%LOCALAPPDATA%\Programs\Embrasure`, and adds only its `bin` directory to the current-user `PATH`. It does not require elevation. Open a new terminal after installation. Use `& $installer -Version 0.5.3` for a pinned release, `-Quiet` for automation, or `-Uninstall` to remove the installed files and owned `PATH` entry. Configuration, credentials, reports, and logs are preserved on uninstall.
 
 Use Embrasure from an existing Snowflake dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
 

@@ -25,6 +25,13 @@ if ($updateSource -notmatch 'include_str!\("\.\./install\.ps1"\)' -or
     throw 'The Windows updater must embed the canonical ZIP installer and use no MSI path.'
 }
 
+$installerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\install.ps1') -Raw
+if ($installerSource -notmatch 'Net\.SecurityProtocolType\]::Tls12' -or
+    $installerSource -notmatch "ProgressPreference = 'SilentlyContinue'" -or
+    $installerSource -notmatch 'Invoke-WebRequest -UseBasicParsing') {
+    throw 'The direct installer must retain its Windows PowerShell 5.1 download compatibility guards.'
+}
+
 . (Join-Path $PSScriptRoot '..\..\install.ps1')
 
 if ((Resolve-EmbrasureVersion -RequestedVersion '1.2.3') -ne '1.2.3') {
@@ -80,6 +87,7 @@ try {
         if ($_.Exception.Message -eq 'Altered archive passed checksum verification.') { throw }
     }
 
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $unsafeArchive = Join-Path $testRoot 'unsafe.zip'
     $zip = [IO.Compression.ZipFile]::Open($unsafeArchive, [IO.Compression.ZipArchiveMode]::Create)

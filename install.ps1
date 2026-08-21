@@ -31,7 +31,9 @@ param(
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
-if ($Quiet) { $ProgressPreference = 'SilentlyContinue' }
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = `
+    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $repository = 'EmbrasureAI/embrasure-cli'
 $target = 'x86_64-pc-windows-msvc'
@@ -124,6 +126,7 @@ function Assert-SafeZipArchive {
         [Parameter(Mandatory = $true)][string]$ExpectedRoot
     )
 
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::OpenRead($Path)
     try {
@@ -337,6 +340,7 @@ function Invoke-EmbrasureInstall {
             $baseUrl = "https://github.com/${repository}/releases/download/v${resolvedVersion}"
             $headers = @{ 'User-Agent' = 'embrasure-installer' }
             Write-InstallerLog "Downloading ${packageName} from ${baseUrl}."
+            if (-not $Quiet) { Write-Host "Downloading Embrasure ${resolvedVersion}..." }
             Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri "${baseUrl}/${packageName}" -OutFile $packagePath
             Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri "${baseUrl}/SHA256SUMS" -OutFile $checksumPath
             $ExpectedSha256 = Read-ExpectedChecksum -ChecksumPath $checksumPath -FileName $packageName
