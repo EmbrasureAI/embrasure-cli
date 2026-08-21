@@ -76,6 +76,9 @@ function Assert-Installed {
     if ($sqlglot.Count -ne 1 -or $sqlglot[0].status -ne 'pass' -or $sqlglot[0].message -ne 'SQLGlot 30.7.0') {
         throw "Packaged SQLGlot probe failed: $($sqlglot | ConvertTo-Json -Compress)"
     }
+    # Exit 3 is the expected doctor result for this deliberately incomplete fixture.
+    # Do not leak it as the PowerShell process result after the lifecycle succeeds.
+    $global:LASTEXITCODE = 0
 }
 
 function Assert-InstalledVersion {
@@ -188,6 +191,7 @@ try {
     if (-not (Test-Path -LiteralPath $configSentinel)) { throw 'Uninstall removed user configuration.' }
     if (-not (Test-Path -LiteralPath $credentialSentinel)) { throw 'Uninstall removed cached credentials.' }
     Assert-UserPathRestored -Expected $userPathBefore
+    Write-Host 'Windows installer lifecycle passed.'
 }
 finally {
     if ((Test-Path -LiteralPath $executable) -and $null -ne $cleanupMsi) {
