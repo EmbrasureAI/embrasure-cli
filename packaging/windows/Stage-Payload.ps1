@@ -24,7 +24,6 @@ $docsDirectory = Join-Path $OutputDirectory 'docs'
 New-Item -ItemType Directory -Path $binDirectory, $pythonDirectory, $docsDirectory -Force | Out-Null
 
 Copy-Item -LiteralPath $BinaryPath -Destination (Join-Path $binDirectory 'embrasure.exe')
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'update-helper.ps1') -Destination $libexecDirectory
 
 $documents = @('LICENSE', 'NOTICE', 'README.md', 'SECURITY.md', 'embrasure-check.example.yml')
 foreach ($document in $documents) {

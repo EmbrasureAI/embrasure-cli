@@ -18,6 +18,8 @@ use sha2::{Digest, Sha256};
 const LATEST_RELEASE: &str =
     "https://api.github.com/repos/EmbrasureAI/embrasure-cli/releases/latest";
 const RELEASE_DOWNLOADS: &str = "https://github.com/EmbrasureAI/embrasure-cli/releases/download";
+#[cfg(windows)]
+const WINDOWS_INSTALLER: &str = include_str!("../install.ps1");
 
 #[derive(Debug, Deserialize)]
 struct LatestRelease {
@@ -169,8 +171,14 @@ async fn self_replace(executable: &Path, version: &str) -> Result<()> {
 
 #[cfg(windows)]
 async fn windows_install(executable: &Path, version: &str) -> Result<String> {
+    if let Some((manager, command)) = windows_package_manager(executable) {
+        return Ok(format!(
+            "Embrasure was installed with {manager}; update it with `{command}`."
+        ));
+    }
+
     let target = release_target()?;
-    let package_name = format!("embrasure-{version}-{target}.msi");
+    let package_name = format!("embrasure-{version}-{target}.zip");
     let base = format!("{RELEASE_DOWNLOADS}/v{version}");
     let client = http_client()?;
     let package = download(&client, &format!("{base}/{package_name}")).await?;
@@ -184,28 +192,29 @@ async fn windows_install(executable: &Path, version: &str) -> Result<String> {
         .context("could not create update directory")?;
     let package_path = scratch.path().join(&package_name);
     fs::write(&package_path, package)?;
+    let installer_path = scratch.path().join("install.ps1");
+    fs::write(&installer_path, WINDOWS_INSTALLER.as_bytes())?;
 
-    let install_root = executable
+    let bin_dir = executable
         .parent()
-        .and_then(Path::parent)
-        .context("could not resolve the Embrasure installation directory")?;
-    let installed_helper = install_root
-        .join("libexec")
-        .join("embrasure")
-        .join("update-helper.ps1");
-    if !installed_helper.is_file() {
+        .context("could not resolve the Embrasure executable directory")?;
+    if !bin_dir
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("bin"))
+    {
         bail!(
-            "the signed Windows update helper is missing at {}; reinstall Embrasure with install.ps1",
-            installed_helper.display()
+            "this portable Embrasure executable cannot update itself in place; update it with its package manager or install it with install.ps1"
         );
     }
+    let install_root = bin_dir
+        .parent()
+        .context("could not resolve the Embrasure installation directory")?;
     let system_root = env::var_os("SystemRoot").context("SystemRoot is unavailable")?;
     let powershell = PathBuf::from(system_root)
         .join("System32")
         .join("WindowsPowerShell")
         .join("v1.0")
         .join("powershell.exe");
-    verify_windows_helper(&powershell, &installed_helper)?;
     let log_dir = BaseDirs::new()
         .context("Windows local application data directory is unavailable")?
         .data_local_dir()
@@ -219,84 +228,55 @@ async fn windows_install(executable: &Path, version: &str) -> Result<String> {
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
-            // The helper and MSI are independently verified before this process starts,
-            // and the helper repeats both checks after the parent exits. AllSigned is not
-            // suitable here because a fresh machine prompts for an unclassified publisher,
-            // which makes a non-interactive update fail even when Authenticode is valid.
+            // This exact script is embedded in the checksum-verifying binary, written to a
+            // private temporary directory, and re-verifies the archive after the parent exits.
             "-ExecutionPolicy",
             "Bypass",
             "-File",
         ])
-        .arg(&installed_helper)
-        .arg("-ParentPid")
-        .arg(std::process::id().to_string())
-        .arg("-MsiPath")
+        .arg(&installer_path)
+        .arg("-Version")
+        .arg(version)
+        .arg("-InstallDir")
+        .arg(install_root)
+        .arg("-ArchivePath")
         .arg(&package_path)
         .arg("-ExpectedSha256")
         .arg(expected)
+        .arg("-WaitForPid")
+        .arg(std::process::id().to_string())
         .arg("-LogPath")
         .arg(&log_path)
+        .arg("-NoPath")
+        .arg("-Quiet")
+        .arg("-CleanupArchiveDirectory")
         .spawn();
     if let Err(error) = child {
         let _ = fs::remove_dir_all(&scratch_path);
-        return Err(error).with_context(|| {
-            format!(
-                "could not start signed update helper at {}",
-                installed_helper.display()
-            )
-        });
+        return Err(error).context("could not start the Windows update helper");
     }
     Ok(format!(
-        "Prepared the Embrasure {version} Windows installer. It will continue after this process exits; log: {}",
+        "Prepared the Embrasure {version} update. It will finish after this process exits; log: {}",
         log_path.display()
     ))
 }
 
 #[cfg(windows)]
-fn verify_windows_helper(powershell: &Path, helper: &Path) -> Result<()> {
-    const VERIFY: &str = r#"
-$expectedRoot = 'F40042E2E5F7E8EF8189FED15519AECE42C3BFA2'
-$signature = Get-AuthenticodeSignature -LiteralPath $env:EMBRASURE_UPDATE_HELPER
-if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) { exit 1 }
-$publisher = $signature.SignerCertificate.GetNameInfo(
-    [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
-    $false
-)
-if ($publisher -ne 'Embrasure, Inc.') { exit 2 }
-$chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-try {
-    $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid
-    [void]$chain.Build($signature.SignerCertificate)
-    if ($chain.ChainElements.Count -eq 0) { exit 3 }
-    $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate.Thumbprint
-    if ($root -ne $expectedRoot) { exit 4 }
-}
-finally {
-    $chain.Dispose()
-}
-"#;
-    let status = Command::new(powershell)
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            VERIFY,
-        ])
-        .env("EMBRASURE_UPDATE_HELPER", helper)
-        .status()
-        .with_context(|| {
-            format!(
-                "could not verify the Windows update helper at {}",
-                helper.display()
-            )
-        })?;
-    if !status.success() {
-        bail!(
-            "the Windows update helper does not have a trusted Embrasure, Inc. signature; reinstall Embrasure with install.ps1"
-        );
+fn windows_package_manager(executable: &Path) -> Option<(&'static str, &'static str)> {
+    let path = executable
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_lowercase();
+    if path.contains("\\scoop\\apps\\embrasure\\") {
+        return Some(("Scoop", "scoop update embrasure"));
     }
-    Ok(())
+    if path.contains("\\microsoft\\winget\\packages\\embrasureai.embrasure_") {
+        return Some((
+            "WinGet",
+            "winget upgrade --id EmbrasureAI.Embrasure --exact",
+        ));
+    }
+    None
 }
 
 async fn download(client: &Client, url: &str) -> Result<Vec<u8>> {
@@ -451,5 +431,31 @@ mod tests {
         );
         assert!(verify_checksum("release.tar.gz", archive, b"bad  release.tar.gz\n").is_err());
         assert!(verify_checksum("other.tar.gz", archive, sums.as_bytes()).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_package_manager_paths_are_detected() {
+        assert_eq!(
+            windows_package_manager(Path::new(
+                r"C:\Users\me\scoop\apps\embrasure\current\bin\embrasure.exe"
+            )),
+            Some(("Scoop", "scoop update embrasure"))
+        );
+        assert_eq!(
+            windows_package_manager(Path::new(
+                r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\EmbrasureAI.Embrasure_Microsoft.Winget.Source_8wekyb3d8bbwe\embrasure-0.5.3-x86_64-pc-windows-msvc\bin\embrasure.exe"
+            )),
+            Some((
+                "WinGet",
+                "winget upgrade --id EmbrasureAI.Embrasure --exact"
+            ))
+        );
+        assert_eq!(
+            windows_package_manager(Path::new(
+                r"C:\Users\me\AppData\Local\Programs\Embrasure\bin\embrasure.exe"
+            )),
+            None
+        );
     }
 }

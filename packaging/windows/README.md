@@ -1,28 +1,32 @@
-# Windows release setup
+# Windows release
 
-The Windows release is intentionally fail-closed. A release tag cannot publish Windows assets unless Azure Artifact Signing succeeds and every final signature validates as `Embrasure, Inc.` under the Microsoft Identity Verification Root Certificate Authority 2020.
+Windows ships as one portable x64 ZIP. The PowerShell installer, WinGet, Scoop, and `embrasure update` all consume that same archive.
 
-## One-time setup
+## Release contents
 
-1. Accept the WiX 7 OSMF EULA and satisfy its maintenance-fee terms when applicable. The project records acceptance with `<AcceptEula>wix7</AcceptEula>`.
-2. Create an Azure Artifact Signing account, complete public-trust identity validation for `Embrasure, Inc.`, and create a certificate profile.
-3. Create an Azure workload identity for GitHub Actions. Its federated subject must be `repo:EmbrasureAI/embrasure-cli:environment:windows-signing`.
-4. Grant only the Artifact Signing Certificate Profile Signer role on the certificate profile.
-5. Create a protected GitHub environment named `windows-signing`. Restrict it to `v*.*.*` tags and require a maintainer reviewer.
-6. Add these environment variables, not client secrets:
-   - `AZURE_ARTIFACT_SIGNING_CLIENT_ID`
-   - `AZURE_ARTIFACT_SIGNING_TENANT_ID`
-   - `AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID`
-   - `AZURE_ARTIFACT_SIGNING_ENDPOINT`
-   - `AZURE_ARTIFACT_SIGNING_ACCOUNT`
-   - `AZURE_ARTIFACT_SIGNING_PROFILE`
+`embrasure-<version>-x86_64-pc-windows-msvc.zip` contains:
 
-The release workflow authenticates with GitHub OIDC. Only the protected signing job receives `id-token: write`.
+- `bin\embrasure.exe`
+- `libexec\embrasure\python\sqlglot-*.whl`
+- licenses, notices, examples, and documentation
+
+The release workflow also publishes `install.ps1`, `SHA256SUMS`, an SPDX SBOM, GitHub build provenance, and generated WinGet/Scoop manifests. It does not require WiX, Azure, a signing certificate, elevation, services, tasks, shortcuts, or telemetry.
+
+## Package-manager publication
+
+After the GitHub release exists:
+
+1. Extract `embrasure-<version>-windows-package-manifests.zip`.
+2. Submit `scoop/embrasure.json` to `ScoopInstaller/Main`.
+3. Submit the three files under `winget/` to `microsoft/winget-pkgs` at `manifests/e/EmbrasureAI/Embrasure/<version>/`.
+4. Verify `scoop install embrasure` and `winget install --id EmbrasureAI.Embrasure --exact` on clean Windows 11 machines.
+
+The templates contain Scoop auto-update metadata, so its release bot can update accepted versions. WinGet updates require a new manifest submission.
 
 ## Release gate
 
-Before the first public Windows release, test the signed assets on a clean Windows 11 x64 VM as a standard user with Smart App Control evaluation enabled and a real dbt project. Cover PowerShell 5.1 and 7 and the complete install → `embrasure doctor` → update → uninstall journey. Also test repair and downgrade rejection, verify that configuration survives uninstall, and confirm that no reboot or elevation is requested. Visually inspect the MSI at 100%, 125%, 150%, and 200% display scaling and retain the verbose installer log.
+CI covers PowerShell 5.1 and 7 parsing, ZIP traversal and checksum rejection, a current-user install under a Unicode path containing spaces, same-version replacement, rollback, exact PATH cleanup, user-data preservation, PE metadata, SQLGlot discovery, and default/all-feature Rust tests.
 
-On Windows Server 2022+, test both policy states. The stock `DisableMSI=1` policy must reject the unmanaged per-user MSI with exit code 1625 and useful guidance. A standard user must pass the complete lifecycle after an administrator sets **Turn off Windows Installer** to **Never** (`DisableMSI=0`). The installer must never change this machine policy itself.
+Before the first public release, repeat the full install → `embrasure doctor` → update → uninstall journey as a standard user on clean Windows 11 and Windows Server 2022 VMs with a real dbt project. Test the direct script, WinGet, and Scoop paths. Confirm that no elevation or reboot is requested and retain the installer log.
 
-Azure Artifact Signing establishes publisher identity but does not guarantee immediate SmartScreen reputation. Never substitute an unsigned or self-signed public artifact while reputation develops.
+The public artifacts are unsigned. SmartScreen or organization policy can still warn about or block direct downloads. SHA-256 checksums, package-manager manifests, and GitHub attestations verify integrity but do not replace Authenticode publisher identity.

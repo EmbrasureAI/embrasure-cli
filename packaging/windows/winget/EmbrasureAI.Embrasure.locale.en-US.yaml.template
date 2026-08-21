@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+
+PackageIdentifier: EmbrasureAI.Embrasure
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: Embrasure, Inc.
+PublisherUrl: https://embrasure.ai
+PublisherSupportUrl: https://github.com/EmbrasureAI/embrasure-cli/issues
+Author: Embrasure, Inc.
+PackageName: Embrasure
+PackageUrl: https://github.com/EmbrasureAI/embrasure-cli
+License: Apache-2.0
+LicenseUrl: https://github.com/EmbrasureAI/embrasure-cli/blob/main/LICENSE
+Copyright: Copyright 2026 Embrasure, Inc.
+ShortDescription: Validate dbt changes against production Snowflake data
+Description: >-
+  Embrasure is an open-source CLI that builds changed dbt models in temporary
+  Snowflake schemas and compares them with production before a pull request is reviewed.
+Moniker: embrasure
+Tags:
+- cli
+- data-engineering
+- data-quality
+- dbt
+- snowflake
+ReleaseNotesUrl: https://github.com/EmbrasureAI/embrasure-cli/releases/tag/v@VERSION@
+Documentations:
+- DocumentLabel: Documentation
+  DocumentUrl: https://github.com/EmbrasureAI/embrasure-cli#readme
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0

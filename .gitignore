@@ -1,6 +1,4 @@
 /target/
-/packaging/windows/bin/
-/packaging/windows/obj/
 /.embrasure-check/
 /.conductor/
 .env

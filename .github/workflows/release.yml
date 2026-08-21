@@ -111,9 +111,6 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
-        with:
-          dotnet-version: "8.0.x"
       - name: Install Rust
         shell: pwsh
         run: |
@@ -137,45 +134,41 @@ jobs:
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
           .\packaging\windows\Test-PeMetadata.ps1 -BinaryPath .\target\x86_64-pc-windows-msvc\release\embrasure.exe -Version $version
-      - name: Stage Windows payload
+      - name: Package and test Windows archive
         shell: pwsh
         run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $package = "embrasure-${version}-x86_64-pc-windows-msvc"
+          $payload = Join-Path $pwd "dist\${package}"
+          New-Item -ItemType Directory -Path .\dist | Out-Null
           .\packaging\windows\Stage-Payload.ps1 `
             -BinaryPath .\target\x86_64-pc-windows-msvc\release\embrasure.exe `
-            -OutputDirectory .\windows-payload
-          .\windows-payload\bin\embrasure.exe --version | Select-String "embrasure $($env:GITHUB_REF_NAME.TrimStart('v'))"
-      - name: Build and test unsigned MSI fixtures
-        shell: pwsh
-        run: |
-          $upgradePayload = Join-Path $env:RUNNER_TEMP 'Embrasure upgrade payload ü'
-          Copy-Item -LiteralPath .\windows-payload -Destination $upgradePayload -Recurse
-          foreach ($fixture in @(
-            @{ Version = '1.0.0'; Output = 'msi-base'; Payload = "$($pwd.Path)\windows-payload" },
-            @{ Version = '1.0.1'; Output = 'msi-upgrade'; Payload = $upgradePayload }
-          )) {
-            $output = Join-Path $env:RUNNER_TEMP $fixture.Output
-            dotnet build .\packaging\windows\Embrasure.wixproj `
-              --no-incremental `
-              --configuration Release `
-              --output $output `
-              -p:ProductVersion=$($fixture.Version) `
-              -p:PayloadDir="$($fixture.Payload)"
-            if ($LASTEXITCODE -ne 0) { throw 'WiX build failed.' }
-          }
+            -OutputDirectory $payload
+          $archive = Join-Path $pwd "dist\${package}.zip"
+          Compress-Archive -LiteralPath $payload -DestinationPath $archive
           .\packaging\windows\Test-Installer.ps1 `
-            -BaseMsi (Join-Path $env:RUNNER_TEMP 'msi-base\embrasure-1.0.0-x86_64-pc-windows-msvc.msi') `
-            -UpgradeMsi (Join-Path $env:RUNNER_TEMP 'msi-upgrade\embrasure-1.0.1-x86_64-pc-windows-msvc.msi')
-      - name: Upload unsigned Windows payload
+            -ArchivePath $archive `
+            -Version $version
+          $manifests = Join-Path $env:RUNNER_TEMP 'windows-package-manifests'
+          .\packaging\windows\New-PackageManifests.ps1 `
+            -Version $version `
+            -ArchiveSha256 (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash `
+            -OutputDirectory $manifests
+          Compress-Archive `
+            -Path (Join-Path $manifests '*') `
+            -DestinationPath (Join-Path $pwd "dist\embrasure-${version}-windows-package-manifests.zip")
+          Copy-Item -LiteralPath .\install.ps1 -Destination .\dist\install.ps1
+          Remove-Item -LiteralPath $payload -Recurse -Force
+      - name: Upload Windows release files
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: windows-unsigned-payload
-          path: windows-payload
+          name: release-windows
+          path: dist/*
           if-no-files-found: error
 
-  package-windows:
+  package:
     needs: [build, build-windows]
-    runs-on: windows-2022
-    environment: windows-signing
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       artifact-metadata: write
@@ -185,21 +178,13 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
-        with:
-          dotnet-version: "8.0.x"
-      - name: Download unsigned Windows payload
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: windows-unsigned-payload
-          path: windows-payload
-      - name: Download Unix release archives
+      - name: Download release archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
-      - name: Generate SPDX SBOM before credentials are available
+      - name: Generate SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           path: .
@@ -209,108 +194,45 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Assert Windows release inventory
-        shell: pwsh
-        env:
-          SBOM_PATH: dist/embrasure-${{ github.ref_name }}.spdx.json
+        shell: bash
         run: |
-          $wheel = @(Get-ChildItem .\windows-payload\libexec\embrasure\python -Filter 'sqlglot-*.whl' -File)
-          if ($wheel.Count -ne 1 -or $wheel[0].Name -ne 'sqlglot-30.7.0-py3-none-any.whl') {
-            throw 'The release inventory does not contain exactly the pinned SQLGlot wheel.'
-          }
-          if (-not (Select-String -LiteralPath $env:SBOM_PATH -SimpleMatch 'sqlglot' -Quiet)) {
-            throw 'The bundled SQLGlot wheel is absent from the SPDX inventory.'
-          }
-      - name: Authenticate to Azure with GitHub OIDC
-        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
-        with:
-          client-id: ${{ vars.AZURE_ARTIFACT_SIGNING_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_ARTIFACT_SIGNING_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID }}
-      - name: Sign executable and update helper
-        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
-        with:
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
-          files: |
-            ${{ github.workspace }}\windows-payload\bin\embrasure.exe
-            ${{ github.workspace }}\windows-payload\libexec\embrasure\update-helper.ps1
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-      - name: Verify signed payload
-        shell: pwsh
-        run: |
-          .\packaging\windows\Test-Signature.ps1 -Path @(
-            '.\windows-payload\bin\embrasure.exe',
-            '.\windows-payload\libexec\embrasure\update-helper.ps1'
-          )
-      - name: Build MSI
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          dotnet build .\packaging\windows\Embrasure.wixproj `
-            --configuration Release `
-            --output .\dist `
-            -p:ProductVersion=$version `
-            -p:PayloadDir="$($pwd.Path)\windows-payload"
-          if ($LASTEXITCODE -ne 0) { throw 'WiX build failed.' }
-          Copy-Item -LiteralPath .\install.ps1 -Destination .\dist\install.ps1
-      - name: Sign MSI and installer script
-        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
-        with:
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
-          files-folder: ${{ github.workspace }}\dist
-          files-folder-filter: msi,ps1
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-      - name: Verify final Windows artifacts
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $msi = ".\dist\embrasure-${version}-x86_64-pc-windows-msvc.msi"
-          .\packaging\windows\Test-Signature.ps1 -Path @($msi, '.\dist\install.ps1')
+          version="${GITHUB_REF_NAME#v}"
+          archive="dist/embrasure-${version}-x86_64-pc-windows-msvc.zip"
+          test -f "${archive}"
+          test -f dist/install.ps1
+          test -f "dist/embrasure-${version}-windows-package-manifests.zip"
+          test "$(unzip -Z1 "${archive}" | grep -c '/libexec/embrasure/python/sqlglot-30.7.0-py3-none-any.whl$')" -eq 1
+          test "$(unzip -Z1 "${archive}" | grep -c '/bin/embrasure.exe$')" -eq 1
       - name: Generate checksums
-        shell: powershell
+        shell: bash
         run: |
-          $artifacts = @(
-            Get-ChildItem .\dist -File |
-              Where-Object { $_.Name -eq 'install.ps1' -or $_.Name -match '\.(tar\.gz|msi|spdx\.json)$' } |
-              Sort-Object Name
-          )
-          $lines = @($artifacts | ForEach-Object {
-            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "${hash}  $($_.Name)"
-          })
-          [IO.File]::WriteAllLines((Join-Path $pwd 'dist\SHA256SUMS'), $lines, [Text.Encoding]::ASCII)
+          cd dist
+          find . -maxdepth 1 -type f \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.ps1' -o -name '*.spdx.json' \) \
+            -print0 | sort -z | xargs -0 sha256sum | sed 's|  \./|  |' > SHA256SUMS
       - name: Attest build provenance
         id: provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             dist/*.tar.gz
-            dist/*.msi
+            dist/*.zip
             dist/install.ps1
             dist/*.spdx.json
             dist/SHA256SUMS
       - name: Stage build provenance
-        shell: powershell
+        shell: bash
         env:
           PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
         run: |
-          if (-not (Test-Path -LiteralPath $env:PROVENANCE_BUNDLE -PathType Leaf)) {
-            throw 'Build provenance bundle is missing.'
-          }
-          Copy-Item -LiteralPath $env:PROVENANCE_BUNDLE -Destination ".\dist\embrasure-$env:GITHUB_REF_NAME.intoto.jsonl"
+          test -f "${PROVENANCE_BUNDLE}"
+          cp "${PROVENANCE_BUNDLE}" "dist/embrasure-${GITHUB_REF_NAME}.intoto.jsonl"
       - name: Attest SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             dist/*.tar.gz
-            dist/*.msi
+            dist/*.zip
             dist/install.ps1
           sbom-path: dist/embrasure-${{ github.ref_name }}.spdx.json
       - name: Upload release bundle
@@ -321,7 +243,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: package-windows
+    needs: package
     runs-on: ubuntu-24.04
     permissions:
       actions: read

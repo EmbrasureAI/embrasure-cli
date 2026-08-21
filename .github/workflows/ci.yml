@@ -53,9 +53,6 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
-        with:
-          dotnet-version: "8.0.x"
       - name: Install pinned SQLGlot
         run: python -m pip install --require-hashes -r packaging/sqlglot-requirements.txt
       - name: Test Windows runtime
@@ -77,44 +74,30 @@ jobs:
       - name: Validate PowerShell sources with PowerShell 7
         shell: pwsh
         run: .\packaging\windows\Test-PowerShell.ps1
-      - name: Stage Windows payload
-        id: payload
+      - name: Package and test Windows archive
         shell: pwsh
         run: |
-          $payload = Join-Path $env:RUNNER_TEMP 'Embrasure payload ü'
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          $package = "embrasure-${version}-x86_64-pc-windows-msvc"
+          $working = Join-Path $env:RUNNER_TEMP 'Embrasure archive ü'
+          $payload = Join-Path $working $package
+          $archive = Join-Path $working "${package}.zip"
           .\packaging\windows\Stage-Payload.ps1 `
             -BinaryPath .\target\x86_64-pc-windows-msvc\release\embrasure.exe `
             -OutputDirectory $payload
-          "path=${payload}" >> $env:GITHUB_OUTPUT
-      - name: Build MSI fixtures
-        shell: pwsh
-        env:
-          PAYLOAD_DIR: ${{ steps.payload.outputs.path }}
-        run: |
-          $upgradePayload = Join-Path $env:RUNNER_TEMP 'Embrasure upgrade payload ü'
-          Copy-Item -LiteralPath $env:PAYLOAD_DIR -Destination $upgradePayload -Recurse
-          $rollbackProbe = Join-Path $upgradePayload 'docs\rollback-probe'
-          New-Item -ItemType Directory -Path $rollbackProbe | Out-Null
-          Set-Content -LiteralPath (Join-Path $rollbackProbe 'probe.txt') -Value 'upgrade rollback probe' -Encoding ASCII
-          foreach ($fixture in @(
-            @{ Version = '1.0.0'; Output = 'msi-base'; Payload = $env:PAYLOAD_DIR },
-            @{ Version = '1.0.1'; Output = 'msi-upgrade'; Payload = $upgradePayload }
-          )) {
-            $output = Join-Path $env:RUNNER_TEMP $fixture.Output
-            dotnet build .\packaging\windows\Embrasure.wixproj `
-              --no-incremental `
-              --configuration Release `
-              --output $output `
-              -p:ProductVersion=$($fixture.Version) `
-              -p:PayloadDir="$($fixture.Payload)"
-            if ($LASTEXITCODE -ne 0) { throw 'WiX build failed.' }
-          }
-      - name: Test MSI install, upgrade, repair, and uninstall
-        shell: pwsh
-        run: |
+          Compress-Archive -LiteralPath $payload -DestinationPath $archive
           .\packaging\windows\Test-Installer.ps1 `
-            -BaseMsi (Join-Path $env:RUNNER_TEMP 'msi-base\embrasure-1.0.0-x86_64-pc-windows-msvc.msi') `
-            -UpgradeMsi (Join-Path $env:RUNNER_TEMP 'msi-upgrade\embrasure-1.0.1-x86_64-pc-windows-msvc.msi')
+            -ArchivePath $archive `
+            -Version $version
+          $manifestRoot = Join-Path $working 'package-manifests'
+          .\packaging\windows\New-PackageManifests.ps1 `
+            -Version $version `
+            -ArchiveSha256 (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash `
+            -OutputDirectory $manifestRoot
+          Get-Content -LiteralPath (Join-Path $manifestRoot 'scoop\embrasure.json') -Raw | ConvertFrom-Json | Out-Null
+          if (Get-ChildItem -LiteralPath $manifestRoot -Recurse -File | Select-String -Pattern '@[A-Z_]+@' -Quiet) {
+            throw 'Generated package-manager manifests contain an unresolved token.'
+          }
 
   msrv:
     runs-on: ubuntu-24.04

@@ -79,7 +79,7 @@ Cleanup is attempted after success, findings, execution failures, Ctrl-C, and no
 
 ## Release integrity
 
-Releases include native archives for macOS and Linux on Intel and ARM, plus a current-user MSI and signed PowerShell installer for Windows x64. Every release includes `SHA256SUMS` and an SPDX JSON software bill of materials bound to the release artifacts by attestation.
+Releases include native archives for macOS and Linux on Intel and ARM, plus a portable ZIP and PowerShell installer for Windows x64. Every release includes `SHA256SUMS` and an SPDX JSON software bill of materials bound to the release artifacts by attestation.
 
 Verify an archive checksum:
 
@@ -94,7 +94,9 @@ Verify its GitHub-signed build provenance:
 gh attestation verify embrasure-*.tar.gz --repo EmbrasureAI/embrasure-cli
 ```
 
-On Windows, both `embrasure.exe` inside the MSI and the MSI itself are Authenticode-signed and RFC 3161 timestamped as `Embrasure, Inc.`. The signed `install.ps1` verifies its own publisher, the Microsoft Artifact Signing public-trust root, the exact checksum entry, and the MSI signature before invoking Windows Installer. `embrasure update` verifies the installed helper's signature, publisher, and trust root before launching it with a process-scoped `Bypass` policy, which avoids first-run publisher prompts without changing the user's or machine's execution policy. The signed helper repeats those checks and revalidates the MSI hash and signature after the CLI exits. Windows Installer then provides replacement and rollback without forcing a reboot.
+On Windows, WinGet and Scoop verify the ZIP against the hash in their reviewed package manifest. The direct `install.ps1` downloads only from the Embrasure GitHub repository, requires exactly one matching entry in `SHA256SUMS`, rejects unsafe or oversized ZIP contents, verifies the executable version and bundled SQLGlot wheel, then replaces the current-user installation with rollback on failure. `embrasure update` downloads and verifies the same ZIP, writes the exact installer script embedded in the running binary to a temporary directory, and launches it with a process-scoped `Bypass` policy. The helper revalidates the archive after the CLI exits before performing the same atomic replacement. It does not change the user's or machine's execution policy.
+
+The Windows executable and PowerShell script are not currently Authenticode-signed. Checksums and GitHub attestations protect artifact integrity, but they do not establish a Windows publisher identity. Direct downloads may show Microsoft Defender SmartScreen warnings; use WinGet or Scoop when local policy blocks unsigned downloads.
 
 Release attestations use short-lived Sigstore-backed identities issued to the GitHub Actions release workflow. The source commit, workflow, and artifact digest are included in the verification result.
 

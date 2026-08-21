@@ -51,7 +51,15 @@ If you do not use Homebrew, use the installer:
 curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/install.sh | sh
 ```
 
-On 64-bit Windows 11 or Windows Server 2022+, use Windows PowerShell 5.1 or PowerShell 7. Download the signed installer script before running it; do not bypass PowerShell execution policy:
+On 64-bit Windows 11 or Windows Server 2022+, install with WinGet or Scoop:
+
+```powershell
+winget install --id EmbrasureAI.Embrasure --exact
+# or
+scoop install embrasure
+```
+
+The same ZIP used by both package managers is available from GitHub Releases. For a direct current-user install, download the installer script before running it so you can inspect it and keep PowerShell's normal execution policy:
 
 ```powershell
 $installer = Join-Path $env:TEMP 'embrasure-install.ps1'
@@ -59,10 +67,7 @@ Invoke-WebRequest https://github.com/EmbrasureAI/embrasure-cli/releases/latest/d
 & $installer
 ```
 
-The signed MSI installs for the current user without elevation. Open a new terminal after installation so it receives the updated user `PATH`.
-
-Windows Server defaults to blocking unmanaged MSI packages for non-admin users. If installation exits with code 1625, an administrator must set **Turn off Windows Installer** to **Never** (`DisableMSI=0`); Embrasure does not bypass that policy. See [Microsoft's Windows Installer policy reference](https://learn.microsoft.com/windows/client-management/mdm/policy-csp-admx-msi#msi-disablemsi).
-Use `& $installer -Version 0.5.3` for a pinned release, or add `-Quiet` and `-LogPath <path>` for automation.
+The script verifies the release checksum, installs under `%LOCALAPPDATA%\Programs\Embrasure`, and adds only its `bin` directory to the current-user `PATH`. It does not require elevation. Open a new terminal after installation. Use `& $installer -Version 0.5.3` for a pinned release, `-Quiet` for automation, or `-Uninstall` to remove the installed files and owned `PATH` entry. Configuration, credentials, reports, and logs are preserved on uninstall.
 
 Use Embrasure from an existing Snowflake dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
 
