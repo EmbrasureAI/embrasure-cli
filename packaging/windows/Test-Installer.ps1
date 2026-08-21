@@ -69,6 +69,9 @@ try {
     if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
         throw 'Installed executable is missing.'
     }
+    if (-not (Test-Path -LiteralPath (Join-Path $installRoot '.embrasure-install') -PathType Leaf)) {
+        throw 'Installed ownership marker is missing.'
+    }
     $reportedVersion = (& $binary --version | Out-String).Trim()
     if ($reportedVersion -ne "embrasure ${Version}") {
         throw "Installed executable reports an unexpected version: ${reportedVersion}"
@@ -140,6 +143,31 @@ try {
         $zip.Dispose()
     }
     . $installerScript
+    $unownedRoot = Join-Path $testRoot 'unowned-directory'
+    $unownedSentinel = Join-Path $unownedRoot 'keep-me.txt'
+    New-Item -ItemType Directory -Path $unownedRoot | Out-Null
+    Set-Content -LiteralPath $unownedSentinel -Value 'preserve' -Encoding ASCII
+    try {
+        Install-EmbrasureArchive `
+            -Path $ArchivePath `
+            -Destination $unownedRoot `
+            -ArchiveVersion $Version `
+            -SkipPath
+        throw 'Installer accepted an unowned directory.'
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Installer accepted an unowned directory.') { throw }
+    }
+    try {
+        Uninstall-Embrasure -Destination $unownedRoot
+        throw 'Uninstaller accepted an unowned directory.'
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Uninstaller accepted an unowned directory.') { throw }
+    }
+    if (-not (Test-Path -LiteralPath $unownedSentinel -PathType Leaf)) {
+        throw 'Uninstaller damaged an unowned directory.'
+    }
     try {
         Install-EmbrasureArchive `
             -Path $invalidArchive `

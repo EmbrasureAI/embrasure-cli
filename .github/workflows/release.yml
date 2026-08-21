@@ -277,9 +277,8 @@ jobs:
       - name: Move the composite action major tag
         shell: bash
         run: |
-          major="${GITHUB_REF_NAME%%.*}"
-          git tag --force "${major}" "${GITHUB_SHA}"
-          git push origin "refs/tags/${major}" --force
+          git tag --force v1 "${GITHUB_SHA}"
+          git push origin refs/tags/v1 --force
 
   tap:
     needs: publish

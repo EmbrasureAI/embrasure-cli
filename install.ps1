@@ -39,6 +39,8 @@ $repository = 'EmbrasureAI/embrasure-cli'
 $target = 'x86_64-pc-windows-msvc'
 $maximumArchiveBytes = 268435456
 $maximumArchiveEntries = 4096
+$installMarkerName = '.embrasure-install'
+$installMarkerValue = 'EmbrasureAI.Embrasure'
 
 function Write-InstallerLog {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -118,6 +120,14 @@ function Get-SafeInstallDirectory {
         }
     }
     return $resolved
+}
+
+function Test-OwnedInstallDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $marker = Join-Path $Path $installMarkerName
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return $false }
+    return [IO.File]::ReadAllText($marker).Trim() -eq $installMarkerValue
 }
 
 function Assert-SafeZipArchive {
@@ -257,6 +267,11 @@ function Install-EmbrasureArchive {
         Expand-Archive -LiteralPath $Path -DestinationPath $extractionDirectory
         $payloadRoot = Join-Path $extractionDirectory $packageRootName
         Test-EmbrasurePayload -PayloadRoot $payloadRoot -ExpectedVersion $ArchiveVersion
+        [IO.File]::WriteAllText(
+            (Join-Path $payloadRoot $installMarkerName),
+            $installMarkerValue,
+            (New-Object Text.UTF8Encoding($false))
+        )
 
         if ($ParentPid -gt 0) {
             $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
@@ -264,6 +279,9 @@ function Install-EmbrasureArchive {
         }
 
         if (Test-Path -LiteralPath $safeDestination) {
+            if (-not (Test-OwnedInstallDirectory -Path $safeDestination)) {
+                throw "Refusing to replace an installation directory not owned by Embrasure: ${safeDestination}"
+            }
             Move-Item -LiteralPath $safeDestination -Destination $backupDirectory
             $movedOldPayload = $true
         }
@@ -310,6 +328,9 @@ function Uninstall-Embrasure {
 
     $safeDestination = Get-SafeInstallDirectory -Path $Destination
     if (Test-Path -LiteralPath $safeDestination) {
+        if (-not (Test-OwnedInstallDirectory -Path $safeDestination)) {
+            throw "Refusing to remove an installation directory not owned by Embrasure: ${safeDestination}"
+        }
         Remove-Item -LiteralPath $safeDestination -Recurse -Force
     }
     if (-not $KeepPath) {
