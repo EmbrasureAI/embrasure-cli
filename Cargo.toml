@@ -1,8 +1,9 @@
 [package]
 name = "embrasure-cli"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 rust-version = "1.88"
+build = "build.rs"
 description = "Embrasure CLI for validating dbt changes against production Snowflake data"
 license = "Apache-2.0"
 repository = "https://github.com/EmbrasureAI/embrasure-cli"
@@ -42,6 +43,12 @@ url = "2.5"
 uuid = { version = "1.16", features = ["v4", "serde"] }
 webbrowser = "1.0"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[build-dependencies]
+winresource = "0.1.31"
+
 [dev-dependencies]
 assert_cmd = "2.0"
 jsonschema = { version = "0.33", default-features = false }
@@ -50,3 +57,10 @@ predicates = "3.1"
 [profile.release]
 lto = "thin"
 strip = true
+
+[package.metadata.winresource]
+ProductName = "Embrasure"
+FileDescription = "Validate dbt changes against production Snowflake data"
+CompanyName = "Embrasure, Inc."
+LegalCopyright = "Copyright 2026 Embrasure, Inc."
+OriginalFilename = "embrasure.exe"

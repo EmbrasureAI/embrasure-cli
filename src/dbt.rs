@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -72,18 +72,24 @@ fn verify_executable_for_shell(command: &str, shell: &str) -> Result<String> {
 }
 
 fn detected_shell() -> String {
-    let shell = env::var_os("SHELL").unwrap_or_default();
-    Path::new(&shell)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| {
-            !name.is_empty()
-                && name
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
-        })
-        .unwrap_or("unknown")
-        .to_owned()
+    #[cfg(windows)]
+    return "powershell".to_owned();
+
+    #[cfg(not(windows))]
+    {
+        let shell = std::env::var_os("SHELL").unwrap_or_default();
+        Path::new(&shell)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| {
+                !name.is_empty()
+                    && name.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || "-_.".contains(character)
+                    })
+            })
+            .unwrap_or("unknown")
+            .to_owned()
+    }
 }
 
 fn path_instruction(shell: &str) -> &'static str {
@@ -91,6 +97,9 @@ fn path_instruction(shell: &str) -> &'static str {
         "zsh" => "add dbt's bin directory to PATH in `~/.zshrc`",
         "bash" => "add dbt's bin directory to PATH in `~/.bashrc`",
         "fish" => "add dbt's bin directory with `fish_add_path`",
+        "powershell" => {
+            "activate the project's Python environment or add dbt's Scripts directory to the user PATH"
+        }
         _ => "add dbt's bin directory to PATH in your shell configuration",
     }
 }
@@ -1166,6 +1175,13 @@ fn path_str(path: &Path) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn powershell_guidance_points_to_the_project_environment() {
+        let instruction = path_instruction("powershell");
+        assert!(instruction.contains("Python environment"));
+        assert!(instruction.contains("user PATH"));
+    }
     use crate::{auth::ResolvedAuth, config::Config};
 
     fn node(id: &str) -> ManifestNode {

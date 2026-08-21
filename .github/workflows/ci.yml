@@ -39,6 +39,82 @@ jobs:
       # Guard the release manifest and packaged file set; this project is not published to crates.io.
       - run: cargo package --locked
 
+  windows:
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: "8.0.x"
+      - name: Install pinned SQLGlot
+        run: python -m pip install --require-hashes -r packaging/sqlglot-requirements.txt
+      - name: Test Windows runtime
+        run: |
+          cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets --all-features -- -D warnings
+          cargo test --locked --target x86_64-pc-windows-msvc
+          cargo test --locked --all-features --target x86_64-pc-windows-msvc
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Verify Windows executable metadata
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -eq 'embrasure-cli').version
+          if (-not $version) { throw 'Could not resolve the Embrasure package version.' }
+          .\packaging\windows\Test-PeMetadata.ps1 -BinaryPath .\target\x86_64-pc-windows-msvc\release\embrasure.exe -Version $version
+      - name: Validate PowerShell sources with Windows PowerShell 5.1
+        shell: powershell
+        run: .\packaging\windows\Test-PowerShell.ps1
+      - name: Validate PowerShell sources with PowerShell 7
+        shell: pwsh
+        run: .\packaging\windows\Test-PowerShell.ps1
+      - name: Stage Windows payload
+        id: payload
+        shell: pwsh
+        run: |
+          $payload = Join-Path $env:RUNNER_TEMP 'Embrasure payload ü'
+          .\packaging\windows\Stage-Payload.ps1 `
+            -BinaryPath .\target\x86_64-pc-windows-msvc\release\embrasure.exe `
+            -OutputDirectory $payload
+          "path=${payload}" >> $env:GITHUB_OUTPUT
+      - name: Build MSI fixtures
+        shell: pwsh
+        env:
+          PAYLOAD_DIR: ${{ steps.payload.outputs.path }}
+        run: |
+          $upgradePayload = Join-Path $env:RUNNER_TEMP 'Embrasure upgrade payload ü'
+          Copy-Item -LiteralPath $env:PAYLOAD_DIR -Destination $upgradePayload -Recurse
+          $rollbackProbe = Join-Path $upgradePayload 'docs\rollback-probe'
+          New-Item -ItemType Directory -Path $rollbackProbe | Out-Null
+          Set-Content -LiteralPath (Join-Path $rollbackProbe 'probe.txt') -Value 'upgrade rollback probe' -Encoding ASCII
+          foreach ($fixture in @(
+            @{ Version = '1.0.0'; Output = 'msi-base'; Payload = $env:PAYLOAD_DIR },
+            @{ Version = '1.0.1'; Output = 'msi-upgrade'; Payload = $upgradePayload }
+          )) {
+            $output = Join-Path $env:RUNNER_TEMP $fixture.Output
+            dotnet build .\packaging\windows\Embrasure.wixproj `
+              --configuration Release `
+              --output $output `
+              -p:ProductVersion=$($fixture.Version) `
+              -p:PayloadDir="$($fixture.Payload)"
+            if ($LASTEXITCODE -ne 0) { throw 'WiX build failed.' }
+          }
+      - name: Test MSI install, upgrade, repair, and uninstall
+        shell: pwsh
+        run: |
+          .\packaging\windows\Test-Installer.ps1 `
+            -BaseMsi (Join-Path $env:RUNNER_TEMP 'msi-base\embrasure-1.0.0-x86_64-pc-windows-msvc.msi') `
+            -UpgradeMsi (Join-Path $env:RUNNER_TEMP 'msi-upgrade\embrasure-1.0.1-x86_64-pc-windows-msvc.msi')
+
   msrv:
     runs-on: ubuntu-24.04
     steps:

@@ -1,10 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -604,11 +605,17 @@ fn expand_home(path: &Path) -> Result<PathBuf> {
         return Ok(path.to_owned());
     };
     if value == "~" || value.starts_with("~/") {
-        let home = env::var_os("HOME").context("HOME is unavailable for key path expansion")?;
-        let suffix = value.strip_prefix("~/").unwrap_or("");
-        return Ok(PathBuf::from(home).join(suffix));
+        let home = BaseDirs::new()
+            .context("home directory is unavailable for key path expansion")?
+            .home_dir()
+            .to_owned();
+        return Ok(expand_home_from(value, &home));
     }
     Ok(path.to_owned())
+}
+
+fn expand_home_from(value: &str, home: &Path) -> PathBuf {
+    home.join(value.strip_prefix("~/").unwrap_or(""))
 }
 
 fn dot() -> PathBuf {
@@ -850,6 +857,14 @@ accounts:
         assert_eq!(
             private_key_path,
             &directory.path().join("config/secrets/key.p8")
+        );
+    }
+
+    #[test]
+    fn home_expansion_uses_an_os_resolved_directory() {
+        assert_eq!(
+            expand_home_from("~/keys/private.p8", Path::new("C:\\Users\\Ada")),
+            PathBuf::from("C:\\Users\\Ada").join("keys/private.p8")
         );
     }
 

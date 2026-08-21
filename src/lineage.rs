@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
+    ffi::OsString,
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -161,20 +162,49 @@ pub fn probe() -> Result<String> {
 
 fn invoke(request: &Request<'_>) -> Result<Response> {
     let bundled = bundled_sqlglot_path()?;
-    let mut command = Command::new(python_command());
+    let commands = python_commands();
+    let mut last_not_found = None;
+    for command in commands {
+        match invoke_with(request, bundled.as_deref(), &command) {
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                last_not_found = Some(error);
+            }
+            result => return result,
+        }
+    }
+    Err(last_not_found.unwrap_or_else(|| anyhow::anyhow!("no Python command is configured")))
+        .context("could not start Python for SQLGlot column lineage")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PythonCommand {
+    program: OsString,
+    args: Vec<OsString>,
+}
+
+fn invoke_with(
+    request: &Request<'_>,
+    bundled: Option<&Path>,
+    python: &PythonCommand,
+) -> Result<Response> {
+    let mut command = Command::new(&python.program);
+    command.args(&python.args);
     if bundled.is_some() {
         command.arg("-I");
     }
     command.args(["-c", SCRIPT]);
-    if let Some(path) = &bundled {
+    if let Some(path) = bundled {
         command.arg(path);
     }
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .context("could not start Python for SQLGlot column lineage")?;
+        .spawn()?;
     serde_json::to_writer(
         child
             .stdin
@@ -197,8 +227,34 @@ fn invoke(request: &Request<'_>) -> Result<Response> {
     serde_json::from_slice(&output.stdout).context("SQLGlot returned invalid lineage JSON")
 }
 
-fn python_command() -> String {
-    env::var("EMBRASURE_PYTHON").unwrap_or_else(|_| "python3".into())
+fn python_commands() -> Vec<PythonCommand> {
+    python_commands_for(env::var_os("EMBRASURE_PYTHON"), cfg!(windows))
+}
+
+fn python_commands_for(configured: Option<OsString>, windows: bool) -> Vec<PythonCommand> {
+    if let Some(program) = configured.filter(|value| !value.is_empty()) {
+        return vec![PythonCommand {
+            program,
+            args: vec![],
+        }];
+    }
+    if windows {
+        vec![
+            PythonCommand {
+                program: OsString::from("python.exe"),
+                args: vec![],
+            },
+            PythonCommand {
+                program: OsString::from("py.exe"),
+                args: vec![OsString::from("-3")],
+            },
+        ]
+    } else {
+        vec![PythonCommand {
+            program: OsString::from("python3"),
+            args: vec![],
+        }]
+    }
 }
 
 fn bundled_sqlglot_path() -> Result<Option<PathBuf>> {
@@ -378,6 +434,37 @@ mod tests {
             exposures: BTreeMap::new(),
             child_map: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn python_resolution_is_platform_aware_and_overrideable() {
+        assert_eq!(
+            python_commands_for(None, false),
+            vec![PythonCommand {
+                program: OsString::from("python3"),
+                args: vec![],
+            }]
+        );
+        assert_eq!(
+            python_commands_for(None, true),
+            vec![
+                PythonCommand {
+                    program: OsString::from("python.exe"),
+                    args: vec![],
+                },
+                PythonCommand {
+                    program: OsString::from("py.exe"),
+                    args: vec![OsString::from("-3")],
+                },
+            ]
+        );
+        assert_eq!(
+            python_commands_for(Some(OsString::from("C:\\Tools\\python.exe")), true),
+            vec![PythonCommand {
+                program: OsString::from("C:\\Tools\\python.exe"),
+                args: vec![],
+            }]
+        );
     }
 
     #[test]

@@ -69,6 +69,7 @@ enum CompletionShell {
     Bash,
     Zsh,
     Fish,
+    Powershell,
 }
 
 impl From<IncrementalModeArg> for IncrementalMode {
@@ -633,6 +634,12 @@ async fn main() -> ExitCode {
                     "embrasure",
                     &mut stdout,
                 ),
+                CompletionShell::Powershell => clap_complete::generate(
+                    clap_complete::shells::PowerShell,
+                    &mut command,
+                    "embrasure",
+                    &mut stdout,
+                ),
             }
             if std::io::stderr().is_terminal() {
                 let hint = match shell {
@@ -644,6 +651,9 @@ async fn main() -> ExitCode {
                     }
                     CompletionShell::Fish => {
                         "Save this script as ~/.config/fish/completions/embrasure.fish."
+                    }
+                    CompletionShell::Powershell => {
+                        "Save this script and source it from your PowerShell profile."
                     }
                 };
                 eprintln!("{hint}");

@@ -51,7 +51,7 @@ Query checks accept a single read-only query expression, but syntax validation i
 - The configuration file contains Snowflake identifiers and environment-variable names, not secret values.
 - Programmatic access tokens and external OAuth tokens are read from environment variables.
 - RSA private keys are read from the configured local path.
-- Browser OAuth sessions are cached under `~/.config/embrasure-check/oauth/` by default. Files and directories use owner-only permissions on Unix. Run `embrasure auth logout` to remove a cached session.
+- Browser OAuth sessions are cached under `~/.config/embrasure-check/oauth/` by default on Unix, with owner-only file and directory permissions. Windows sessions are encrypted for the current user with DPAPI and stored under `%APPDATA%\embrasure-check\oauth\`. Run `embrasure auth logout` to remove a cached session.
 - Temporary dbt profiles, manifests, target directories, and the detached base worktree live under an operating-system temporary directory and are removed after the process exits normally.
 
 Credentials are not included in normal terminal output, JSON reports, or Markdown reports.
@@ -79,7 +79,7 @@ Cleanup is attempted after success, findings, execution failures, Ctrl-C, and no
 
 ## Release integrity
 
-Releases include native archives for macOS and Linux on Intel and ARM, a `SHA256SUMS` file, and one source-tree SPDX JSON software bill of materials bound to each archive by attestation.
+Releases include native archives for macOS and Linux on Intel and ARM, plus a current-user MSI and signed PowerShell installer for Windows x64. Every release includes `SHA256SUMS` and an SPDX JSON software bill of materials bound to the release artifacts by attestation.
 
 Verify an archive checksum:
 
@@ -93,6 +93,8 @@ Verify its GitHub-signed build provenance:
 ```sh
 gh attestation verify embrasure-*.tar.gz --repo EmbrasureAI/embrasure-cli
 ```
+
+On Windows, both `embrasure.exe` inside the MSI and the MSI itself are Authenticode-signed and RFC 3161 timestamped as `Embrasure, Inc.`. The signed `install.ps1` verifies its own publisher, the Microsoft Artifact Signing public-trust root, the exact checksum entry, and the MSI signature before invoking Windows Installer. `embrasure update` performs the same checks, launches its installed helper with PowerShell's `AllSigned` policy, exits, and delegates replacement and rollback to Windows Installer without forcing a reboot.
 
 Release attestations use short-lived Sigstore-backed identities issued to the GitHub Actions release workflow. The source commit, workflow, and artifact digest are included in the verification result.
 

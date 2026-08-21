@@ -217,14 +217,7 @@ async fn execute(
             }
             result
         };
-        tokio::pin!(main);
-        tokio::select! {
-            result = &mut main => result,
-            result = termination_signal() => {
-                result?;
-                Err(anyhow::anyhow!("received a termination signal; validation stopped and cleanup was attempted"))
-            }
-        }
+        finish_or_interrupt(main, termination_signal()).await
     };
 
     if let Err(error) = main_result {
@@ -239,6 +232,22 @@ async fn execute(
     }
     cleanup_schemas(config, &clients, &schema, report, options.progress.as_ref()).await;
     Ok(())
+}
+
+async fn finish_or_interrupt<M, S>(main: M, signal: S) -> Result<()>
+where
+    M: std::future::Future<Output = Result<()>>,
+    S: std::future::Future<Output = Result<()>>,
+{
+    tokio::pin!(main);
+    tokio::pin!(signal);
+    tokio::select! {
+        result = &mut main => result,
+        result = &mut signal => {
+            result?;
+            Err(anyhow::anyhow!("received a termination signal; validation stopped and cleanup was attempted"))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1963,8 +1972,9 @@ fn error_report(base: &str, error: anyhow::Error) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::auth::ResolvedAuth;
     use crate::{
-        auth::ResolvedAuth,
         dbt::{DependsOn, ManifestNode, NodeConfig, QuotePolicy},
         query::QueryExecutor,
         snowflake::{QueryResult, ResultColumn},
@@ -1972,6 +1982,19 @@ mod tests {
     use std::{collections::VecDeque, future::Future, path::PathBuf, pin::Pin, sync::Mutex};
 
     struct FakeExecutor(Mutex<VecDeque<QueryResult>>);
+
+    #[tokio::test]
+    async fn termination_stops_validation_with_actionable_guidance() {
+        let error = finish_or_interrupt(
+            std::future::pending::<Result<()>>(),
+            std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("termination signal"));
+        assert!(message.contains("cleanup was attempted"));
+    }
 
     impl QueryExecutor for FakeExecutor {
         fn execute<'a>(
