@@ -4,7 +4,7 @@ PackageIdentifier: EmbrasureAI.Embrasure
 PackageVersion: @VERSION@
 InstallerType: zip
 NestedInstallerType: portable
-ReleaseDate: @RELEASE_DATE@
+ReleaseDate: "@RELEASE_DATE@"
 Installers:
 - Architecture: x64
   NestedInstallerFiles:
