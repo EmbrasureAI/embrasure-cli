@@ -100,7 +100,7 @@ try {
 
     $installedBin = Join-Path $installRoot 'bin'
     $pathEntries = @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';')
-    if (($pathEntries | Where-Object { $_ -ieq $installedBin }).Count -ne 1 -or
+    if (@($pathEntries | Where-Object { $_ -ieq $installedBin }).Count -ne 1 -or
         -not ($pathEntries -contains $neighborBefore) -or
         -not ($pathEntries -contains $neighborAfter)) {
         throw 'Installer did not add exactly one owned PATH entry while preserving neighbors.'
@@ -125,7 +125,7 @@ try {
         throw 'Same-version reinstall did not replace the old payload.'
     }
     $pathEntries = @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';')
-    if (($pathEntries | Where-Object { $_ -ieq $installedBin }).Count -ne 1) {
+    if (@($pathEntries | Where-Object { $_ -ieq $installedBin }).Count -ne 1) {
         throw 'Same-version reinstall duplicated the PATH entry.'
     }
 
