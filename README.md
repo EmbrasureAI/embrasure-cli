@@ -51,15 +51,7 @@ If you do not use Homebrew, use the installer:
 curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/install.sh | sh
 ```
 
-On 64-bit Windows 11 or Windows Server 2022+, install with WinGet or Scoop:
-
-```powershell
-winget install --id EmbrasureAI.Embrasure --exact
-# or
-scoop install embrasure
-```
-
-The same ZIP used by both package managers is available from GitHub Releases. For a direct current-user install, download the installer script before running it so you can inspect it and keep PowerShell's normal execution policy:
+On 64-bit Windows 11 or Windows Server 2022+, install from GitHub Releases. Download the PowerShell script before running it so you can inspect it and keep the normal execution policy:
 
 ```powershell
 $installer = Join-Path $env:TEMP 'embrasure-install.ps1'
@@ -69,7 +61,15 @@ Unblock-File $installer
 & $installer
 ```
 
-`Unblock-File` marks the inspected download as trusted; it does not change PowerShell's execution policy. If organization policy still blocks the script, use WinGet, Scoop, or the portable ZIP. The script verifies the release checksum, installs under `%LOCALAPPDATA%\Programs\Embrasure`, and adds only its `bin` directory to the current-user `PATH`. It does not require elevation. Open a new terminal after installation. Use `& $installer -Version 0.5.3` for a pinned release, `-Quiet` for automation, or `-Uninstall` to remove the installed files and owned `PATH` entry. Configuration, credentials, reports, and logs are preserved on uninstall.
+`Unblock-File` removes the internet-zone marker after inspection; it does not change PowerShell's execution policy or verify the publisher. If organization policy blocks the script, use the portable ZIP from the same release. The script verifies the release checksum, installs under `%LOCALAPPDATA%\Programs\Embrasure`, and adds only its `bin` directory to the current-user `PATH`. It does not require elevation. Open a new terminal after installation. Use `& $installer -Version 0.5.3` for a pinned release, `-Quiet` for automation, or `-Uninstall` to remove the installed files and owned `PATH` entry. Configuration, credentials, reports, and logs are preserved on uninstall.
+
+WinGet and Scoop manifests are generated with each release. After their first listings are accepted:
+
+```powershell
+winget install --id EmbrasureAI.Embrasure --exact
+# or
+scoop install embrasure
+```
 
 Use Embrasure from an existing Snowflake dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
 
