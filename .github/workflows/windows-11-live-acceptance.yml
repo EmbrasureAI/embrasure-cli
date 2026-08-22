@@ -182,8 +182,16 @@ jobs:
             git commit -m 'Exercise equivalent SQL change'
 
             $binary = Join-Path $env:LOCALAPPDATA 'Programs\Embrasure\bin\embrasure.exe'
+            $doctorJson = & $binary --config embrasure-check.yml doctor --read-only --json | Out-String
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows doctor failed: ${doctorJson}"
+            }
+            $doctor = $doctorJson | ConvertFrom-Json
+            if (-not $doctor.ready) { throw "Windows doctor was not ready: ${doctorJson}" }
             $passJson = & $binary --config embrasure-check.yml check --base main --json | Out-String
-            if ($LASTEXITCODE -ne 0) { throw "Equivalent change returned $LASTEXITCODE." }
+            if ($LASTEXITCODE -ne 0) {
+              throw "Equivalent change returned $LASTEXITCODE`: ${passJson}"
+            }
             $pass = $passJson | ConvertFrom-Json
             if ($pass.status -ne 'pass' -or $pass.summary.findings -ne 0) {
               throw 'Equivalent change did not produce a clean pass.'
