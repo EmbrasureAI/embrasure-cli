@@ -553,7 +553,9 @@ pub fn prepare(
 ) -> Result<DbtContext> {
     let scratch = tempfile::tempdir().context("could not create temporary dbt directory")?;
     let repo_root = git_output(&config.dbt.project_dir, &["rev-parse", "--show-toplevel"])?;
-    let repo_root = PathBuf::from(repo_root.trim());
+    let repo_root = PathBuf::from(repo_root.trim())
+        .canonicalize()
+        .context("could not resolve the Git repository root")?;
 
     let profiles_dir = scratch.path().join("profiles");
     fs::create_dir_all(&profiles_dir)?;
@@ -608,11 +610,7 @@ pub fn prepare(
             path: base_worktree.clone(),
             active: true,
         });
-        let relative_project = config
-            .dbt
-            .project_dir
-            .strip_prefix(&repo_root)
-            .context("dbt.project_dir must be inside the Git repository")?;
+        let relative_project = relative_project_path(&config.dbt.project_dir, &repo_root)?;
         let base_project = base_worktree.join(relative_project);
         let base_profiles = scratch.path().join("base-profiles");
         fs::create_dir_all(&base_profiles)?;
@@ -1172,9 +1170,41 @@ fn path_str(path: &Path) -> Result<&str> {
     path.to_str().context("path contains invalid UTF-8")
 }
 
+fn relative_project_path(project_dir: &Path, repo_root: &Path) -> Result<PathBuf> {
+    let project_dir = project_dir
+        .canonicalize()
+        .context("could not resolve dbt.project_dir")?;
+    let repo_root = repo_root
+        .canonicalize()
+        .context("could not resolve the Git repository root")?;
+    Ok(project_dir
+        .strip_prefix(&repo_root)
+        .context("dbt.project_dir must be inside the Git repository")?
+        .to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_path_is_compared_after_filesystem_normalization() {
+        let repository = tempfile::tempdir().unwrap();
+        let project = repository.path().join("dbt project ü");
+        fs::create_dir(&project).unwrap();
+        let canonical_project = project.canonicalize().unwrap();
+        assert_eq!(
+            relative_project_path(&canonical_project, repository.path()).unwrap(),
+            PathBuf::from("dbt project ü")
+        );
+    }
+
+    #[test]
+    fn project_path_outside_repository_is_rejected() {
+        let repository = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        assert!(relative_project_path(project.path(), repository.path()).is_err());
+    }
 
     #[test]
     fn powershell_guidance_points_to_the_project_environment() {
