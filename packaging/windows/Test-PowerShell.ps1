@@ -110,6 +110,21 @@ try {
     if (-not (Test-SamePath -Left 'C:\Tools\Embrasure\bin\' -Right 'c:\tools\embrasure\bin')) {
         throw 'Equivalent Windows PATH entries were not recognized.'
     }
+
+    $safeUpdateDirectory = Join-Path ([IO.Path]::GetTempPath()) "embrasure-update-$([guid]::NewGuid().ToString('N'))"
+    $safeUpdateArchive = Join-Path $safeUpdateDirectory 'archive.zip'
+    if (-not (Test-SamePath `
+        -Left (Get-SafeUpdateCleanupDirectory -Path $safeUpdateArchive) `
+        -Right $safeUpdateDirectory)) {
+        throw 'The updater rejected its own temporary directory.'
+    }
+    try {
+        Get-SafeUpdateCleanupDirectory -Path (Join-Path $testRoot 'archive.zip') | Out-Null
+        throw 'The updater accepted an arbitrary cleanup directory.'
+    }
+    catch {
+        if ($_.Exception.Message -eq 'The updater accepted an arbitrary cleanup directory.') { throw }
+    }
 }
 finally {
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue

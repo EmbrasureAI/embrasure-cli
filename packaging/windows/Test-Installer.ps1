@@ -143,6 +143,18 @@ try {
         $zip.Dispose()
     }
     . $installerScript
+    $cleanupSentinel = Join-Path $testRoot 'do-not-delete'
+    New-Item -ItemType Directory -Path $cleanupSentinel | Out-Null
+    try {
+        Get-SafeUpdateCleanupDirectory -Path (Join-Path $cleanupSentinel 'archive.zip') | Out-Null
+        throw 'Update cleanup accepted an arbitrary directory.'
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Update cleanup accepted an arbitrary directory.') { throw }
+    }
+    if (-not (Test-Path -LiteralPath $cleanupSentinel -PathType Container)) {
+        throw 'Update cleanup removed an arbitrary directory.'
+    }
     $unownedRoot = Join-Path $testRoot 'unowned-directory'
     $unownedSentinel = Join-Path $unownedRoot 'keep-me.txt'
     New-Item -ItemType Directory -Path $unownedRoot | Out-Null

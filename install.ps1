@@ -219,6 +219,21 @@ function Test-SamePath {
     }
 }
 
+function Get-SafeUpdateCleanupDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $archive = [IO.Path]::GetFullPath($Path)
+    $directory = Split-Path -Parent $archive
+    $parent = Split-Path -Parent $directory
+    $leaf = Split-Path -Leaf $directory
+    $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+    if (-not (Test-SamePath -Left $parent -Right $temporaryRoot) -or
+        $leaf -notmatch '^embrasure-update-[A-Za-z0-9_-]+$') {
+        throw "Refusing to clean an update directory not created by Embrasure: ${directory}"
+    }
+    return $directory
+}
+
 function Add-EmbrasureToUserPath {
     param([Parameter(Mandatory = $true)][string]$BinDirectory)
 
@@ -340,6 +355,13 @@ function Uninstall-Embrasure {
 
 function Invoke-EmbrasureInstall {
     $safeInstallDir = Get-SafeInstallDirectory -Path $InstallDir
+    $cleanupDirectory = $null
+    if ($CleanupArchiveDirectory) {
+        if ([string]::IsNullOrEmpty($ArchivePath)) {
+            throw 'Update cleanup requires an existing archive path.'
+        }
+        $cleanupDirectory = Get-SafeUpdateCleanupDirectory -Path $ArchivePath
+    }
     if ($Uninstall) {
         Write-InstallerLog "Uninstalling from ${safeInstallDir}."
         Uninstall-Embrasure -Destination $safeInstallDir -KeepPath:$NoPath
@@ -391,9 +413,15 @@ function Invoke-EmbrasureInstall {
         if ($null -ne $temporary) {
             Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
         }
-        if ($CleanupArchiveDirectory -and -not [string]::IsNullOrEmpty($ArchivePath)) {
-            $archiveDirectory = Split-Path -Parent ([IO.Path]::GetFullPath($ArchivePath))
-            Remove-Item -LiteralPath $archiveDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        if ($null -ne $cleanupDirectory) {
+            $cleanupDirectory = Get-SafeUpdateCleanupDirectory -Path $ArchivePath
+            if (Test-Path -LiteralPath $cleanupDirectory) {
+                $cleanupItem = Get-Item -LiteralPath $cleanupDirectory -Force
+                if (($cleanupItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "Refusing to clean an update directory through a reparse point: ${cleanupDirectory}"
+                }
+            }
+            Remove-Item -LiteralPath $cleanupDirectory -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }

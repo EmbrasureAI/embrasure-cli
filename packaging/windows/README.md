@@ -29,6 +29,6 @@ The templates contain Scoop auto-update metadata, so its release bot can update 
 
 CI covers PowerShell 5.1 and 7 parsing, ZIP traversal and checksum rejection, a current-user install under a Unicode path containing spaces, same-version replacement, rollback, exact PATH cleanup, user-data preservation, PE metadata, SQLGlot discovery, and default/all-feature Rust tests.
 
-Before the first public release, repeat the full install → `embrasure doctor` → update → uninstall journey as a standard user on clean Windows 11 and Windows Server 2022 VMs with a real dbt project. Test the direct script, WinGet, and Scoop paths. Confirm that no elevation or reboot is requested and retain the installer log.
+Before the first public release, repeat the full install → `embrasure doctor` → update → uninstall journey with the direct script, a standard user, and a real dbt project on clean Windows 11 and Windows Server 2022 VMs. Confirm that no elevation or reboot is requested and retain the installer log. After the WinGet and Scoop submissions are accepted, test each catalog install and update path on a clean Windows 11 machine before advertising those commands as available.
 
 The public artifacts are unsigned. SmartScreen or organization policy can still warn about or block direct downloads. SHA-256 checksums, package-manager manifests, and GitHub attestations verify integrity but do not replace Authenticode publisher identity.
