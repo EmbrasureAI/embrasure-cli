@@ -214,6 +214,8 @@ jobs:
             if (@($finding.ci_schemas | Where-Object { -not $_.cleaned_up }).Count -ne 0) {
               throw 'The findings run did not clean up its Snowflake schema.'
             }
+            Write-Output "Verified a clean pass and $($finding.summary.findings) expected finding(s)."
+            $global:LASTEXITCODE = 0
           }
           finally {
             Pop-Location
