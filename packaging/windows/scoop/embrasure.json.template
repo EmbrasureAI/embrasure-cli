@@ -1,0 +1,25 @@
+{
+    "version": "@VERSION@",
+    "description": "Validate dbt changes against production Snowflake data",
+    "homepage": "https://github.com/EmbrasureAI/embrasure-cli",
+    "license": "Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "@ARCHIVE_URL@",
+            "hash": "@SHA256@"
+        }
+    },
+    "extract_dir": "@PACKAGE_ROOT@",
+    "bin": "bin\\embrasure.exe",
+    "checkver": {
+        "github": "https://github.com/EmbrasureAI/embrasure-cli"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/EmbrasureAI/embrasure-cli/releases/download/v$version/embrasure-$version-x86_64-pc-windows-msvc.zip"
+            }
+        },
+        "extract_dir": "embrasure-$version-x86_64-pc-windows-msvc"
+    }
+}

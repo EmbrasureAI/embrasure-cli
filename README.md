@@ -25,7 +25,7 @@ Embrasure is open-source, local dbt PR validation for Snowflake:
 
 ## Quickstart
 
-From an existing Snowflake dbt Core project where `dbt` already runs:
+From an existing Snowflake dbt Core project where `dbt` already runs, install Embrasure on macOS or Linux:
 
 ```sh
 brew install embrasureai/tap/embrasure
@@ -49,6 +49,31 @@ If you do not use Homebrew, use the installer:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/EmbrasureAI/embrasure-cli/main/install.sh | sh
+```
+
+On 64-bit Windows 11 or Windows Server 2022+, install from GitHub Releases. Download the PowerShell script before running it so you can inspect it and keep the normal execution policy:
+
+```powershell
+$installer = Join-Path $env:TEMP 'embrasure-install.ps1'
+Invoke-WebRequest https://github.com/EmbrasureAI/embrasure-cli/releases/latest/download/install.ps1 -OutFile $installer
+Get-Content $installer
+Unblock-File $installer
+& $installer
+```
+
+`Unblock-File` removes the internet-zone marker after inspection; it does not change PowerShell's execution policy or verify the publisher. If organization policy blocks the script, use the portable ZIP from the same release. The script verifies the release checksum, installs under `%LOCALAPPDATA%\Programs\Embrasure`, and adds only its `bin` directory to the current-user `PATH`. It does not require elevation. Open a new terminal after installation. Use `& $installer -Version 0.5.3` for a pinned release, `-Quiet` for automation, or `-Uninstall` to remove the installed files and owned `PATH` entry. Configuration, credentials, reports, and logs are preserved on uninstall.
+
+WinGet manifests are generated with each release. After the first WinGet listing is accepted:
+
+```powershell
+winget install --id EmbrasureAI.Embrasure --exact
+```
+
+Scoop users can install from Embrasure's official bucket:
+
+```powershell
+scoop bucket add embrasure https://github.com/EmbrasureAI/scoop-bucket
+scoop install embrasure/embrasure
 ```
 
 Use Embrasure from an existing Snowflake dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
@@ -217,6 +242,7 @@ Generate shell completion scripts:
 embrasure completion bash
 embrasure completion zsh
 embrasure completion fish
+embrasure completion powershell
 ```
 
 ## Troubleshooting
@@ -246,6 +272,7 @@ Every temporary schema has a unique name and ownership marker. Query results are
 ## Current limits
 
 - Snowflake is the only supported warehouse.
+- Native Windows support requires 64-bit Windows 11 or Windows Server 2022+. Windows 10, Windows on Arm, and machine-wide installation are not supported.
 - Column lineage covers compiled dbt SQL that SQLGlot can resolve. Wildcards without an input schema and dynamic SQL are reported as unresolved.
 - Dashboard column lineage is not inferred from model lineage.
 - Metabase matching covers native SQL cards that reference fully qualified production relations. Unsupported or inaccessible metadata becomes a coverage gap.

@@ -39,6 +39,122 @@ jobs:
       # Guard the release manifest and packaged file set; this project is not published to crates.io.
       - run: cargo package --locked
 
+  windows:
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned SQLGlot
+        run: python -m pip install --require-hashes -r packaging/sqlglot-requirements.txt
+      - name: Test Windows runtime
+        run: |
+          cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets --all-features -- -D warnings
+          cargo test --locked --target x86_64-pc-windows-msvc
+          cargo test --locked --all-features --target x86_64-pc-windows-msvc
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Verify Windows executable metadata
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -eq 'embrasure-cli').version
+          if (-not $version) { throw 'Could not resolve the Embrasure package version.' }
+          .\packaging\windows\Test-PeMetadata.ps1 -BinaryPath .\target\x86_64-pc-windows-msvc\release\embrasure.exe -Version $version
+      - name: Validate PowerShell sources with Windows PowerShell 5.1
+        shell: powershell
+        run: .\packaging\windows\Test-PowerShell.ps1
+      - name: Validate PowerShell sources with PowerShell 7
+        shell: pwsh
+        run: .\packaging\windows\Test-PowerShell.ps1
+      - name: Package and test Windows archive
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          $package = "embrasure-${version}-x86_64-pc-windows-msvc"
+          $working = Join-Path $env:RUNNER_TEMP 'Embrasure archive ü'
+          $payload = Join-Path $working $package
+          $archive = Join-Path $working "${package}.zip"
+          .\packaging\windows\Stage-Payload.ps1 `
+            -BinaryPath .\target\x86_64-pc-windows-msvc\release\embrasure.exe `
+            -OutputDirectory $payload
+          Compress-Archive -LiteralPath $payload -DestinationPath $archive
+          .\packaging\windows\Test-Installer.ps1 `
+            -ArchivePath $archive `
+            -Version $version `
+            -InstallerEngine WindowsPowerShell
+          .\packaging\windows\Test-Installer.ps1 `
+            -ArchivePath $archive `
+            -Version $version `
+            -InstallerEngine PowerShell
+          $manifestRoot = Join-Path $working 'package-manifests'
+          .\packaging\windows\New-PackageManifests.ps1 `
+            -Version $version `
+            -ArchiveSha256 (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash `
+            -OutputDirectory $manifestRoot
+          Get-Content -LiteralPath (Join-Path $manifestRoot 'scoop\embrasure.json') -Raw | ConvertFrom-Json | Out-Null
+          $unresolvedTokens = @(Get-ChildItem -LiteralPath $manifestRoot -Recurse -File | Select-String -Pattern '@[A-Z_]+@')
+          if ($unresolvedTokens.Count -ne 0) {
+            throw 'Generated package-manager manifests contain an unresolved token.'
+          }
+          New-Item -ItemType Directory -Path .\ci-windows-dist | Out-Null
+          Copy-Item -LiteralPath $archive -Destination .\ci-windows-dist
+          Copy-Item -LiteralPath .\install.ps1 -Destination .\ci-windows-dist
+          Compress-Archive `
+            -Path (Join-Path $manifestRoot '*') `
+            -DestinationPath ".\ci-windows-dist\embrasure-${version}-windows-package-manifests.zip"
+      - name: Upload Windows acceptance-test files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-acceptance-test
+          path: ci-windows-dist/*
+          if-no-files-found: error
+
+  windows-11:
+    # GitHub's hosted Windows 11 image uses Arm hardware. Running the packaged
+    # x64 executable here validates Windows 11 itself through the OS x64
+    # compatibility layer; Windows Arm64 is not a supported build target.
+    needs: windows
+    runs-on: windows-11-arm
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download the exact Windows package tested on x64
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-acceptance-test
+          path: windows-acceptance-test
+      - name: Test the Windows 11 installer lifecycle
+        shell: pwsh
+        run: |
+          $archive = @(Get-ChildItem `
+            -LiteralPath .\windows-acceptance-test `
+            -Filter 'embrasure-*-x86_64-pc-windows-msvc.zip' `
+            -File)
+          if ($archive.Count -ne 1) {
+            throw "Expected one Windows x64 archive; found $($archive.Count)."
+          }
+          $version = if ($archive[0].Name -match '^embrasure-(\d+\.\d+\.\d+)-') {
+            $Matches[1]
+          } else {
+            throw "Could not parse the package version from $($archive[0].Name)."
+          }
+          .\packaging\windows\Test-Installer.ps1 `
+            -ArchivePath $archive[0].FullName `
+            -Version $version `
+            -InstallerEngine WindowsPowerShell
+          .\packaging\windows\Test-Installer.ps1 `
+            -ArchivePath $archive[0].FullName `
+            -Version $version `
+            -InstallerEngine PowerShell
+
   msrv:
     runs-on: ubuntu-24.04
     steps:
@@ -46,4 +162,4 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install minimum supported Rust
         run: rustup toolchain install 1.88 --profile minimal
-      - run: cargo +1.88 check --locked --all-targets
+      - run: cargo +1.88 check --locked --all-targets --all-features
