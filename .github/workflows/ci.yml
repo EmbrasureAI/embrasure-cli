@@ -117,6 +117,44 @@ jobs:
           path: ci-windows-dist/*
           if-no-files-found: error
 
+  windows-11:
+    # GitHub's hosted Windows 11 image uses Arm hardware. Running the packaged
+    # x64 executable here validates Windows 11 itself through the OS x64
+    # compatibility layer; Windows Arm64 is not a supported build target.
+    needs: windows
+    runs-on: windows-11-arm
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download the exact Windows package tested on x64
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-acceptance-test
+          path: windows-acceptance-test
+      - name: Test the Windows 11 installer lifecycle
+        shell: pwsh
+        run: |
+          $archive = @(Get-ChildItem `
+            -LiteralPath .\windows-acceptance-test `
+            -Filter 'embrasure-*-x86_64-pc-windows-msvc.zip' `
+            -File)
+          if ($archive.Count -ne 1) {
+            throw "Expected one Windows x64 archive; found $($archive.Count)."
+          }
+          $version = if ($archive[0].Name -match '^embrasure-(\d+\.\d+\.\d+)-') {
+            $Matches[1]
+          } else {
+            throw "Could not parse the package version from $($archive[0].Name)."
+          }
+          .\packaging\windows\Test-Installer.ps1 `
+            -ArchivePath $archive[0].FullName `
+            -Version $version `
+            -InstallerEngine WindowsPowerShell
+          .\packaging\windows\Test-Installer.ps1 `
+            -ArchivePath $archive[0].FullName `
+            -Version $version `
+            -InstallerEngine PowerShell
+
   msrv:
     runs-on: ubuntu-24.04
     steps:
