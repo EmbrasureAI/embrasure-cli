@@ -133,7 +133,7 @@ try {
         throw 'Same-version reinstall duplicated the PATH entry.'
     }
 
-    $updateRoot = Join-Path $env:RUNNER_TEMP "embrasure-update-$([guid]::NewGuid().ToString('N'))"
+    $updateRoot = Join-Path ([IO.Path]::GetTempPath()) "embrasure-update-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $updateRoot | Out-Null
     $updateArchive = Join-Path $updateRoot (Split-Path -Leaf $ArchivePath)
     Set-Content -LiteralPath $updateArchive -Value 'corrupt until the parent exits' -Encoding ASCII
