@@ -63,12 +63,17 @@ Unblock-File $installer
 
 `Unblock-File` removes the internet-zone marker after inspection; it does not change PowerShell's execution policy or verify the publisher. If organization policy blocks the script, use the portable ZIP from the same release. The script verifies the release checksum, installs under `%LOCALAPPDATA%\Programs\Embrasure`, and adds only its `bin` directory to the current-user `PATH`. It does not require elevation. Open a new terminal after installation. Use `& $installer -Version 0.5.3` for a pinned release, `-Quiet` for automation, or `-Uninstall` to remove the installed files and owned `PATH` entry. Configuration, credentials, reports, and logs are preserved on uninstall.
 
-WinGet and Scoop manifests are generated with each release. After their first listings are accepted:
+WinGet manifests are generated with each release. After the first WinGet listing is accepted:
 
 ```powershell
 winget install --id EmbrasureAI.Embrasure --exact
-# or
-scoop install embrasure
+```
+
+Scoop users can install from Embrasure's official bucket:
+
+```powershell
+scoop bucket add embrasure https://github.com/EmbrasureAI/scoop-bucket
+scoop install embrasure/embrasure
 ```
 
 Use Embrasure from an existing Snowflake dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
