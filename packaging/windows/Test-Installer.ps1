@@ -25,6 +25,7 @@ $archiveHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash
 $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $neighborBefore = Join-Path $testRoot 'neighbor-before'
 $neighborAfter = Join-Path $testRoot 'neighbor-after'
+$updateRoot = $null
 $installerPowerShell = if ($InstallerEngine -eq 'PowerShell') {
     (Get-Command pwsh.exe -ErrorAction Stop).Source
 } else {
@@ -132,6 +133,39 @@ try {
         throw 'Same-version reinstall duplicated the PATH entry.'
     }
 
+    $updateRoot = Join-Path $env:RUNNER_TEMP "embrasure-update-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $updateRoot | Out-Null
+    $updateArchive = Join-Path $updateRoot (Split-Path -Leaf $ArchivePath)
+    Set-Content -LiteralPath $updateArchive -Value 'corrupt until the parent exits' -Encoding ASCII
+    $sourceForCommand = (Resolve-Path $ArchivePath).Path.Replace("'", "''")
+    $destinationForCommand = $updateArchive.Replace("'", "''")
+    $replacementCommand = `
+        "Start-Sleep -Milliseconds 750; Copy-Item -LiteralPath '${sourceForCommand}' -Destination '${destinationForCommand}' -Force"
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($replacementCommand))
+    $replacement = Start-Process `
+        -FilePath $installerPowerShell `
+        -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand) `
+        -PassThru
+    $updateArguments = @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', $installerScript,
+        '-Version', $Version,
+        '-InstallDir', $installRoot,
+        '-ArchivePath', $updateArchive,
+        '-ExpectedSha256', $archiveHash,
+        '-WaitForPid', $replacement.Id,
+        '-LogPath', $logPath,
+        '-NoPath', '-Quiet', '-CleanupArchiveDirectory'
+    )
+    Invoke-InstallerProcess -Arguments $updateArguments
+    if (Test-Path -LiteralPath $updateRoot) {
+        throw 'The update helper did not remove its private temporary directory.'
+    }
+    $updateRoot = $null
+    if ((& $binary --version | Out-String).Trim() -ne "embrasure ${Version}") {
+        throw 'The wait-for-parent update did not preserve a runnable installation.'
+    }
+
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $invalidArchive = Join-Path $testRoot 'invalid-layout.zip'
@@ -221,4 +255,7 @@ try {
 finally {
     [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if ($null -ne $updateRoot) {
+        Remove-Item -LiteralPath $updateRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
