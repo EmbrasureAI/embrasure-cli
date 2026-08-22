@@ -40,7 +40,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download 32535451791 `
+          gh run download 32541684918 `
             --repo EmbrasureAI/embrasure-cli `
             --name windows-acceptance-test `
             --dir (Join-Path $env:RUNNER_TEMP 'release-candidate')
