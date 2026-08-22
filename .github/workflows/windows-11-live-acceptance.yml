@@ -67,9 +67,33 @@ jobs:
       - name: Install the dbt project prerequisites
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check 'dbt-core==1.11.8' 'dbt-snowflake==1.11.4'
+          $pythonRoot = Join-Path $env:RUNNER_TEMP 'python-3.12-x64'
+          $pythonInstaller = Join-Path $env:RUNNER_TEMP 'python-3.12.10-amd64.exe'
+          Invoke-WebRequest `
+            -UseBasicParsing `
+            -Uri 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe' `
+            -OutFile $pythonInstaller
+          $signature = Get-AuthenticodeSignature -LiteralPath $pythonInstaller
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.Subject -notmatch 'Python Software Foundation') {
+            throw 'The Python x64 installer does not have the expected valid publisher signature.'
+          }
+          $install = Start-Process `
+            -FilePath $pythonInstaller `
+            -ArgumentList @(
+              '/quiet', 'InstallAllUsers=0', "TargetDir=${pythonRoot}",
+              'PrependPath=0', 'Include_launcher=0', 'Include_test=0'
+            ) `
+            -Wait `
+            -PassThru
+          if ($install.ExitCode -ne 0) { throw "Python x64 installation exited with $($install.ExitCode)." }
+          $python = Join-Path $pythonRoot 'python.exe'
+          & $python -m pip install --disable-pip-version-check 'dbt-core==1.11.8' 'dbt-snowflake==1.11.4'
           if ($LASTEXITCODE -ne 0) { throw 'Could not install dbt prerequisites.' }
-          dbt --version
+          $scripts = Join-Path $pythonRoot 'Scripts'
+          $scripts | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $pythonRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & (Join-Path $scripts 'dbt.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'dbt is not runnable.' }
       - name: Run a real Snowflake pass and finding journey
         shell: pwsh
