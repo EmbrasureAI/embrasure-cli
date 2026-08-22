@@ -21,8 +21,9 @@ foreach ($script in $scripts) {
 $updateSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\src\update.rs') -Raw
 if ($updateSource -notmatch 'include_str!\("\.\./install\.ps1"\)' -or
     $updateSource -notmatch '"-ExecutionPolicy",\s*\r?\n\s*"Bypass"' -or
+    $updateSource -notmatch '\.prefix\("embrasure-update-"\)' -or
     $updateSource -match '\.msi') {
-    throw 'The Windows updater must embed the canonical ZIP installer and use no MSI path.'
+    throw 'The Windows updater must embed the canonical ZIP installer, use its private temp prefix, and use no MSI path.'
 }
 
 $installerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\install.ps1') -Raw
