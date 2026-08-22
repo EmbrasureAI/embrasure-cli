@@ -263,8 +263,7 @@ function Install-EmbrasureArchive {
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$Destination,
         [Parameter(Mandatory = $true)][string]$ArchiveVersion,
-        [switch]$SkipPath,
-        [int]$ParentPid = 0
+        [switch]$SkipPath
     )
 
     $safeDestination = Get-SafeInstallDirectory -Path $Destination
@@ -287,11 +286,6 @@ function Install-EmbrasureArchive {
             $installMarkerValue,
             (New-Object Text.UTF8Encoding($false))
         )
-
-        if ($ParentPid -gt 0) {
-            $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
-            if ($null -ne $parent) { $parent.WaitForExit() }
-        }
 
         if (Test-Path -LiteralPath $safeDestination) {
             if (-not (Test-OwnedInstallDirectory -Path $safeDestination)) {
@@ -370,6 +364,11 @@ function Invoke-EmbrasureInstall {
         return
     }
 
+    if ($WaitForPid -gt 0) {
+        $parent = Get-Process -Id $WaitForPid -ErrorAction SilentlyContinue
+        if ($null -ne $parent) { $parent.WaitForExit() }
+    }
+
     $resolvedVersion = Resolve-EmbrasureVersion -RequestedVersion $Version
     $packageName = "embrasure-${resolvedVersion}-${target}.zip"
     $temporary = $null
@@ -398,8 +397,7 @@ function Invoke-EmbrasureInstall {
             -Path $packagePath `
             -Destination $safeInstallDir `
             -ArchiveVersion $resolvedVersion `
-            -SkipPath:$NoPath `
-            -ParentPid $WaitForPid
+            -SkipPath:$NoPath
         Write-InstallerLog "Installed Embrasure ${resolvedVersion} to ${safeInstallDir}."
         if (-not $Quiet) {
             Write-Host "Installed Embrasure ${resolvedVersion}. Open a new terminal, then run 'embrasure doctor'."
