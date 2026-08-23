@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify tag matches Cargo version
         shell: bash
         run: |
@@ -49,6 +51,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -102,18 +106,86 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  publish:
-    needs: build
+  build-windows:
+    needs: verify
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+      - name: Build Windows release binary
+        run: |
+          cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets --all-features -- -D warnings
+          cargo test --locked --target x86_64-pc-windows-msvc
+          cargo test --locked --all-features --target x86_64-pc-windows-msvc
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Validate PowerShell sources with Windows PowerShell 5.1
+        shell: powershell
+        run: .\packaging\windows\Test-PowerShell.ps1
+      - name: Validate PowerShell sources with PowerShell 7
+        shell: pwsh
+        run: .\packaging\windows\Test-PowerShell.ps1
+      - name: Verify Windows executable metadata
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          .\packaging\windows\Test-PeMetadata.ps1 -BinaryPath .\target\x86_64-pc-windows-msvc\release\embrasure.exe -Version $version
+      - name: Package and test Windows archive
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $package = "embrasure-${version}-x86_64-pc-windows-msvc"
+          $payload = Join-Path $pwd "dist\${package}"
+          New-Item -ItemType Directory -Path .\dist | Out-Null
+          .\packaging\windows\Stage-Payload.ps1 `
+            -BinaryPath .\target\x86_64-pc-windows-msvc\release\embrasure.exe `
+            -OutputDirectory $payload
+          $archive = Join-Path $pwd "dist\${package}.zip"
+          Compress-Archive -LiteralPath $payload -DestinationPath $archive
+          .\packaging\windows\Test-Installer.ps1 `
+            -ArchivePath $archive `
+            -Version $version
+          $manifests = Join-Path $env:RUNNER_TEMP 'windows-package-manifests'
+          .\packaging\windows\New-PackageManifests.ps1 `
+            -Version $version `
+            -ArchiveSha256 (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash `
+            -OutputDirectory $manifests
+          Compress-Archive `
+            -Path (Join-Path $manifests '*') `
+            -DestinationPath (Join-Path $pwd "dist\embrasure-${version}-windows-package-manifests.zip")
+          Copy-Item -LiteralPath .\install.ps1 -Destination .\dist\install.ps1
+          Remove-Item -LiteralPath $payload -Recurse -Force
+      - name: Upload Windows release files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-windows
+          path: dist/*
+          if-no-files-found: error
+
+  package:
+    needs: [build, build-windows]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
       artifact-metadata: write
       attestations: write
-      contents: write
+      contents: read
       id-token: write
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download release archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -129,24 +201,69 @@ jobs:
           syft-version: v1.51.0
           upload-artifact: false
           upload-release-assets: false
+      - name: Assert Windows release inventory
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="dist/embrasure-${version}-x86_64-pc-windows-msvc.zip"
+          test -f "${archive}"
+          test -f dist/install.ps1
+          test -f "dist/embrasure-${version}-windows-package-manifests.zip"
+          test "$(unzip -Z1 "${archive}" | grep -cE '[/\\]libexec[/\\]embrasure[/\\]python[/\\]sqlglot-30\.7\.0-py3-none-any\.whl$')" -eq 1
+          test "$(unzip -Z1 "${archive}" | grep -cE '[/\\]bin[/\\]embrasure\.exe$')" -eq 1
       - name: Generate checksums
-        run: cd dist && sha256sum -- *.tar.gz *.spdx.json > SHA256SUMS
+        shell: bash
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.ps1' -o -name '*.spdx.json' \) \
+            -print0 | sort -z | xargs -0 sha256sum | sed 's|  \./|  |' > SHA256SUMS
       - name: Attest build provenance
         id: provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-checksums: dist/SHA256SUMS
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/install.ps1
+            dist/*.spdx.json
+            dist/SHA256SUMS
       - name: Stage build provenance
+        shell: bash
         env:
           PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
         run: |
-          test -s "${PROVENANCE_BUNDLE}"
+          test -f "${PROVENANCE_BUNDLE}"
           cp "${PROVENANCE_BUNDLE}" "dist/embrasure-${GITHUB_REF_NAME}.intoto.jsonl"
       - name: Attest SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: dist/*.tar.gz
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/install.ps1
           sbom-path: dist/embrasure-${{ github.ref_name }}.spdx.json
+      - name: Upload release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-bundle
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: dist
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -169,6 +286,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download release checksums
         env:
           GH_TOKEN: ${{ github.token }}
@@ -188,7 +307,9 @@ jobs:
           mac_intel="$(checksum "embrasure-${version}-x86_64-apple-darwin.tar.gz")"
           linux_arm="$(checksum "embrasure-${version}-aarch64-unknown-linux-gnu.tar.gz")"
           linux_intel="$(checksum "embrasure-${version}-x86_64-unknown-linux-gnu.tar.gz")"
-          test -n "${mac_arm}${mac_intel}${linux_arm}${linux_intel}"
+          for checksum_value in "${mac_arm}" "${mac_intel}" "${linux_arm}" "${linux_intel}"; do
+            [[ "${checksum_value}" =~ ^[0-9a-f]{64}$ ]]
+          done
           mkdir -p tap/Formula
           sed \
             -e "s/@VERSION@/${version}/g" \
@@ -197,6 +318,10 @@ jobs:
             -e "s/@LINUX_ARM@/${linux_arm}/g" \
             -e "s/@LINUX_INTEL@/${linux_intel}/g" \
             .github/embrasure.rb.template > tap/Formula/embrasure.rb
+          if grep -Eq '@[A-Z_]+@' tap/Formula/embrasure.rb; then
+            echo 'Homebrew formula contains an unresolved template token.' >&2
+            exit 1
+          fi
           cd tap
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com

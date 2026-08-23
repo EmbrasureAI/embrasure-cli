@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
@@ -352,6 +353,8 @@ fn load_cached(account: &AccountConfig) -> Result<CachedToken> {
     let path = token_path(account)?;
     let bytes = fs::read(&path)
         .with_context(|| format!("no cached Snowflake session at {}", path.display()))?;
+    let bytes = decode_secret(&bytes)
+        .with_context(|| format!("could not decrypt Snowflake session at {}", path.display()))?;
     let token: CachedToken = serde_json::from_slice(&bytes)
         .with_context(|| format!("invalid cached Snowflake session at {}", path.display()))?;
     if token.account != account.account || !token.user.eq_ignore_ascii_case(&account.user) {
@@ -379,11 +382,8 @@ fn save_cached(account: &AccountConfig, response: &TokenResponse) -> Result<()> 
 fn token_path(account: &AccountConfig) -> Result<PathBuf> {
     let root = if let Some(value) = env::var_os("EMBRASURE_CHECK_CONFIG_DIR") {
         PathBuf::from(value)
-    } else if let Some(value) = env::var_os("XDG_CONFIG_HOME") {
-        PathBuf::from(value).join("embrasure-check")
     } else {
-        PathBuf::from(env::var_os("HOME").context("HOME is unavailable")?)
-            .join(".config/embrasure-check")
+        default_config_root()?
     };
     let identity = format!("{}:{}", account.account, account.user.to_ascii_uppercase());
     let digest = Sha256::digest(identity.as_bytes());
@@ -391,7 +391,73 @@ fn token_path(account: &AccountConfig) -> Result<PathBuf> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    Ok(root.join("oauth").join(format!("{name}.json")))
+    #[cfg(windows)]
+    let name = format!("{name}.bin");
+    #[cfg(not(windows))]
+    let name = format!("{name}.json");
+    Ok(root.join("oauth").join(name))
+}
+
+#[cfg(windows)]
+fn default_config_root() -> Result<PathBuf> {
+    Ok(BaseDirs::new()
+        .context("Windows configuration directory is unavailable")?
+        .config_dir()
+        .join("embrasure-check"))
+}
+
+#[cfg(not(windows))]
+fn default_config_root() -> Result<PathBuf> {
+    if let Some(value) = env::var_os("XDG_CONFIG_HOME") {
+        Ok(PathBuf::from(value).join("embrasure-check"))
+    } else {
+        Ok(BaseDirs::new()
+            .context("home directory is unavailable")?
+            .home_dir()
+            .join(".config/embrasure-check"))
+    }
+}
+
+#[cfg(not(windows))]
+fn decode_secret(bytes: &[u8]) -> Result<Vec<u8>> {
+    Ok(bytes.to_vec())
+}
+
+#[cfg(windows)]
+fn decode_secret(bytes: &[u8]) -> Result<Vec<u8>> {
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::Cryptography::{
+            CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
+        },
+    };
+
+    let input_len = u32::try_from(bytes.len()).context("encrypted session is too large")?;
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: input_len,
+        pbData: bytes.as_ptr().cast_mut(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    let success = unsafe {
+        CryptUnprotectData(
+            &input,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if success == 0 {
+        return Err(std::io::Error::last_os_error()).context("Windows DPAPI rejected the session");
+    }
+    let plaintext =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        let _ = LocalFree(output.pbData.cast());
+    }
+    Ok(plaintext)
 }
 
 #[cfg(unix)]
@@ -408,14 +474,56 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::Cryptography::{CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData},
+    };
+
+    let input_len = u32::try_from(bytes.len()).context("Snowflake session is too large")?;
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: input_len,
+        pbData: bytes.as_ptr().cast_mut(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    let description = std::ffi::OsStr::new("Embrasure Snowflake OAuth session")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let success = unsafe {
+        CryptProtectData(
+            &input,
+            description.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if success == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("Windows DPAPI could not protect the Snowflake session");
+    }
+    let ciphertext =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        let _ = LocalFree(output.pbData.cast());
+    }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(path)?;
-    file.write_all(bytes)?;
+    file.write_all(&ciphertext)?;
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    fs::write(path, bytes)?;
     Ok(())
 }
 
@@ -473,5 +581,22 @@ mod tests {
         assert_eq!(verifier.len(), 64);
         assert!(challenge.len() >= 43);
         assert!(!challenge.contains('='));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dpapi_round_trips_and_rejects_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.bin");
+        let plaintext = br#"{"token":"sensitive"}"#;
+        write_secret_file(&path, plaintext).unwrap();
+        let ciphertext = fs::read(&path).unwrap();
+        assert_ne!(ciphertext, plaintext);
+        assert_eq!(decode_secret(&ciphertext).unwrap(), plaintext);
+
+        let mut corrupted = ciphertext;
+        let middle = corrupted.len() / 2;
+        corrupted[middle] ^= 0xff;
+        assert!(decode_secret(&corrupted).is_err());
     }
 }

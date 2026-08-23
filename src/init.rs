@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use directories::BaseDirs;
 use serde::Serialize;
 use serde_yaml::Value;
 
@@ -196,7 +197,7 @@ fn profiles_file() -> Option<PathBuf> {
     if let Some(directory) = env::var_os("DBT_PROFILES_DIR") {
         return Some(PathBuf::from(directory).join("profiles.yml"));
     }
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".dbt/profiles.yml"))
+    BaseDirs::new().map(|dirs| dirs.home_dir().join(".dbt/profiles.yml"))
 }
 
 fn mapping_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {

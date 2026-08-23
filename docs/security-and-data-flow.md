@@ -51,7 +51,7 @@ Query checks accept a single read-only query expression, but syntax validation i
 - The configuration file contains Snowflake identifiers and environment-variable names, not secret values.
 - Programmatic access tokens and external OAuth tokens are read from environment variables.
 - RSA private keys are read from the configured local path.
-- Browser OAuth sessions are cached under `~/.config/embrasure-check/oauth/` by default. Files and directories use owner-only permissions on Unix. Run `embrasure auth logout` to remove a cached session.
+- Browser OAuth sessions are cached under `~/.config/embrasure-check/oauth/` by default on Unix, with owner-only file and directory permissions. Windows sessions are encrypted for the current user with DPAPI and stored under `%APPDATA%\embrasure-check\oauth\`. Run `embrasure auth logout` to remove a cached session.
 - Temporary dbt profiles, manifests, target directories, and the detached base worktree live under an operating-system temporary directory and are removed after the process exits normally.
 
 Credentials are not included in normal terminal output, JSON reports, or Markdown reports.
@@ -79,7 +79,7 @@ Cleanup is attempted after success, findings, execution failures, Ctrl-C, and no
 
 ## Release integrity
 
-Releases include native archives for macOS and Linux on Intel and ARM, a `SHA256SUMS` file, and one source-tree SPDX JSON software bill of materials bound to each archive by attestation.
+Releases include native archives for macOS and Linux on Intel and ARM, plus a portable ZIP and PowerShell installer for Windows x64. Every release includes `SHA256SUMS` and an SPDX JSON software bill of materials bound to the release artifacts by attestation.
 
 Verify an archive checksum:
 
@@ -93,6 +93,10 @@ Verify its GitHub-signed build provenance:
 ```sh
 gh attestation verify embrasure-*.tar.gz --repo EmbrasureAI/embrasure-cli
 ```
+
+On Windows, WinGet and Scoop verify the ZIP against the hash in their reviewed package manifest. The direct `install.ps1` downloads only from the Embrasure GitHub repository, requires exactly one matching entry in `SHA256SUMS`, rejects unsafe or oversized ZIP contents, verifies the executable version and bundled SQLGlot wheel, then replaces the current-user installation with rollback on failure. `embrasure update` downloads and verifies the same ZIP, writes the exact installer script embedded in the running binary to a temporary directory, and launches it with a process-scoped `Bypass` policy. The helper revalidates the archive after the CLI exits before performing the same atomic replacement. It does not change the user's or machine's execution policy.
+
+The Windows executable and PowerShell script are not currently Authenticode-signed. Checksums and GitHub attestations protect artifact integrity, but they do not establish a Windows publisher identity. Direct downloads may show Microsoft Defender SmartScreen warnings; use WinGet or Scoop when local policy blocks unsigned downloads.
 
 Release attestations use short-lived Sigstore-backed identities issued to the GitHub Actions release workflow. The source commit, workflow, and artifact digest are included in the verification result.
 

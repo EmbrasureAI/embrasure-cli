@@ -179,11 +179,20 @@ accounts:
     assert_eq!(report["exit_code"], 3);
     assert!(report["ci_schemas"].as_array().unwrap().is_empty());
     let error = report["execution_errors"][0].as_str().unwrap();
-    assert!(error.contains("detected shell: zsh"));
     assert!(error.contains("Install dbt Core and dbt-snowflake"));
-    assert!(error.contains("~/.zshrc"));
     assert!(error.contains("missing-dbt-for-embrasure-test --version"));
     assert!(!error.contains("No such file or directory"));
+    #[cfg(windows)]
+    {
+        assert!(error.contains("detected shell: powershell"));
+        assert!(error.contains("Python environment"));
+        assert!(error.contains("user PATH"));
+    }
+    #[cfg(not(windows))]
+    {
+        assert!(error.contains("detected shell: zsh"));
+        assert!(error.contains("~/.zshrc"));
+    }
 }
 
 #[test]
@@ -319,7 +328,7 @@ fn default_release_has_no_cloud_surface() {
 
 #[test]
 fn completions_support_only_documented_shells() {
-    for shell in ["bash", "zsh", "fish"] {
+    for shell in ["bash", "zsh", "fish", "powershell"] {
         Command::cargo_bin("embrasure")
             .unwrap()
             .args(["completion", shell])
@@ -329,7 +338,7 @@ fn completions_support_only_documented_shells() {
     }
     Command::cargo_bin("embrasure")
         .unwrap()
-        .args(["completion", "powershell"])
+        .args(["completion", "cmd"])
         .assert()
         .failure();
 }
