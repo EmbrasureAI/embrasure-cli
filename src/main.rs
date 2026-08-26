@@ -4,6 +4,7 @@ mod clean;
 mod cloud;
 mod compare;
 mod config;
+mod databricks;
 mod dbt;
 mod doctor;
 mod git;
@@ -12,6 +13,7 @@ mod lineage;
 mod loopback;
 mod metabase;
 mod progress;
+mod provider;
 mod query;
 mod report;
 mod run;
@@ -85,7 +87,7 @@ impl From<IncrementalModeArg> for IncrementalMode {
 #[command(
     name = "embrasure",
     version,
-    about = "Validate dbt changes against production Snowflake data"
+    about = "Validate dbt changes against production warehouse data"
 )]
 struct Cli {
     /// Configuration file.
@@ -167,7 +169,7 @@ enum Command {
         #[arg(long, value_name = "PATH", requires = "cloud")]
         context_file: Option<PathBuf>,
     },
-    /// Check local tools, credentials, Snowflake permissions, optional Metabase access, and available updates.
+    /// Check local tools, credentials, warehouse permissions, optional Metabase access, and available updates.
     Doctor {
         /// Skip the temporary schema create/drop permission test.
         #[arg(long)]

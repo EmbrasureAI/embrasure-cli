@@ -54,11 +54,11 @@ impl Phase {
     const fn label(self) -> &'static str {
         match self {
             Self::Setup => "Verify local setup",
-            Self::Schema => "Create temporary Snowflake schemas",
+            Self::Schema => "Create temporary warehouse schemas",
             Self::Impact => "Map affected models",
             Self::Build => "Build selected models",
             Self::Compare => "Compare results with production",
-            Self::Cleanup => "Remove temporary Snowflake schemas",
+            Self::Cleanup => "Remove temporary warehouse schemas",
         }
     }
 }

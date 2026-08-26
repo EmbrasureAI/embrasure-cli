@@ -576,13 +576,13 @@ impl Report {
                     if cleaned == self.ci_schemas.len() {
                         let _ = writeln!(
                             output,
-                            "  Temporary Snowflake schema{} removed",
+                            "  Temporary warehouse schema{} removed",
                             plural(self.ci_schemas.len())
                         );
                     } else {
                         let _ = writeln!(
                             output,
-                            "  {cleaned} / {} temporary Snowflake schemas removed",
+                            "  {cleaned} / {} temporary warehouse schemas removed",
                             self.ci_schemas.len()
                         );
                     }

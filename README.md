@@ -13,17 +13,17 @@
 
 <p align="center"><strong>Catch unexpected data changes before a dbt PR is reviewed.</strong></p>
 
-Embrasure is open-source, local dbt PR validation for Snowflake:
+Embrasure is open-source, local dbt PR validation for Snowflake and Databricks:
 
 - Builds changed models and critical downstream paths in temporary schemas, then cleans them up.
 - Runs dbt tests and compares schema, row counts, null rates, cardinality, ranges, and primary keys with production.
 - Shows affected downstream models and columns.
-- Connects directly to Snowflake, with no Embrasure account or data sent to Embrasure.
+- Connects directly to your warehouse, with no Embrasure account or data sent to Embrasure.
 - Includes a [`verify`](.agents/skills/verify/SKILL.md) skill that runs the agent check-and-fix loop.
 
-`embrasure auth login` uses Snowflake OAuth. Your role needs warehouse access, production read access, and permission to create and remove temporary schemas.
+`embrasure auth login` uses Snowflake OAuth. Databricks uses a token supplied through the configured environment variable. The warehouse identity needs production read access and permission to create and remove temporary schemas.
 
-## Quickstart
+## Snowflake quickstart
 
 From your existing Snowflake dbt Core project directory, create or activate its Python environment:
 
@@ -52,6 +52,36 @@ By default, `check` compares your branch with `origin/main`.
 Embrasure uses the dbt Core and Snowflake adapter versions already installed by your project. Activate the project's normal environment, or set `dbt.command` in `embrasure-check.yml` to the wrapper your project uses.
 
 </details>
+
+## Databricks
+
+Install the Databricks dbt adapter instead of `dbt-snowflake`:
+
+```sh
+python -m pip install "dbt-core>=1.5,<2" "dbt-databricks>=1.5,<2" "sqlglot>=30,<31"
+```
+
+Use a version 2 configuration with a typed provider block:
+
+```yaml
+version: 2
+dbt:
+  project_dir: .
+  profile: analytics
+accounts:
+  - name: primary
+    provider:
+      type: databricks
+      host: https://your-workspace.cloud.databricks.com
+      http_path: /sql/1.0/warehouses/your-warehouse-id
+      catalog: analytics
+      production_schema: prod
+      auth:
+        type: token
+        token_env: DATABRICKS_TOKEN
+```
+
+The integration uses a Databricks SQL warehouse and Unity Catalog. Set `DATABRICKS_TOKEN`, then run `embrasure doctor` and `embrasure check`. Incremental baselines currently require managed Delta tables and use Unity Catalog shallow clones; `doctor` verifies that a suitable table and grants are available.
 
 If you do not use Homebrew, use the installer:
 
@@ -101,9 +131,9 @@ winget install --id EmbrasureAI.Embrasure --exact
 
 </details>
 
-Use Embrasure from an existing Snowflake dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
+Use Embrasure from an existing Snowflake or Databricks dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
 
-`init` reads the active dbt profile and asks only for missing values. Use `--config <path>` before or after any subcommand to choose another config file.
+For Snowflake, `init` reads the active dbt profile and asks only for missing values. Databricks uses the version 2 configuration shown above. Use `--config <path>` before or after any subcommand to choose another config file.
 
 Continue only when `embrasure doctor` reports `READY`. Embrasure generates a temporary dbt profile for its own runs; it does not modify your existing profile or production models.
 
@@ -126,7 +156,7 @@ Evidence
   Schema, row counts, nulls, cardinality, and distributions checked
   1 primary key checked
   0 findings · 3 unvalidated models
-  Temporary Snowflake schema removed
+  Temporary warehouse schema removed
 
 Lineage impact
   fct_orders
@@ -160,7 +190,7 @@ embrasure check --dry-run
 embrasure check --dry-run --json
 ```
 
-Dry runs use local dbt parsing but do not resolve credentials, create Snowflake schemas, or query warehouse data.
+Dry runs use local dbt parsing but do not resolve credentials, create warehouse schemas, or query warehouse data.
 
 ## Reports and exit codes
 
@@ -282,7 +312,7 @@ Your `generate_schema_name` macro must preserve the complete target schema. Make
 
 ### Incremental relation cannot be cloned
 
-Snowflake zero-copy `CREATE TABLE ... CLONE` supports tables, not every relation type. Use `--incremental-mode full-refresh` when a full rebuild is acceptable, or exclude the model from this validation path.
+Every existing incremental model needs a stable baseline copy, including in `full-refresh` mode. Snowflake supports tables that can be zero-copy cloned; Databricks currently supports managed Delta tables that can be shallow cloned. Use another materialization or exclude an unsupported relation from this validation path.
 
 ### Incremental candidate seeding fails
 
@@ -294,13 +324,13 @@ Use `--config <path>` before or after any subcommand to choose another config fi
 
 See the [example configuration](embrasure-check.example.yml) and [enterprise setup guide](docs/enterprise.md) for service credentials, multiple accounts, model policies, filters, thresholds, concurrency, external changes, cross-account dependencies, Metabase, and grants.
 
-Every temporary schema has a unique name and ownership marker. Query results are materialized in a dedicated run-owned schema so they cannot collide with dbt model aliases. Embrasure checks ownership before removal and treats cleanup failures as execution failures. Use a dedicated role that can read and clone only the production tables under test and create temporary schemas in the required databases. SQL validation is not a side-effect sandbox, so the role must not be able to call unsafe procedures, functions, or external integrations.
+Every temporary schema has a unique name and ownership marker. Query results are materialized in a dedicated run-owned schema so they cannot collide with dbt model aliases. Embrasure checks ownership before removal and treats cleanup failures as execution failures. Use a dedicated identity that can read and clone only the production tables under test and create temporary schemas in the required databases or catalogs. SQL validation is not a side-effect sandbox, so the identity must not be able to call unsafe procedures, functions, or external integrations.
 
 [Security and data flow](docs/security-and-data-flow.md) documents network connections, local files, returned data, credentials, cleanup, updates, and release verification.
 
 ## Current limits
 
-- Snowflake is the only supported warehouse.
+- Databricks support requires a Unity Catalog SQL warehouse and environment-supplied token authentication.
 - Native Windows support requires 64-bit Windows 11 or Windows Server 2022+. Windows 10, Windows on Arm, and machine-wide installation are not supported.
 - Column lineage covers compiled dbt SQL that SQLGlot can resolve. Wildcards without an input schema and dynamic SQL are reported as unresolved.
 - Dashboard column lineage is not inferred from model lineage.

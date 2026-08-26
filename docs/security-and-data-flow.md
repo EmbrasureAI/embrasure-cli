@@ -9,7 +9,7 @@ Local Git repository + local dbt + Embrasure CLI
                          |
                          | SQL and authentication
                          v
-                 Your Snowflake account
+              Your configured warehouse
                          |
                          | Aggregate metrics and optional key examples
                          v
@@ -18,25 +18,26 @@ Local terminal or report
 Optional: Embrasure reads metadata from your configured Metabase URL.
 ```
 
-Validation SQL runs in Snowflake. Embrasure does not upload warehouse data, dbt artifacts, reports, credentials, or usage information to Embrasure.
+Validation SQL runs in Snowflake or Databricks. Embrasure does not upload warehouse data, dbt artifacts, reports, credentials, or usage information to Embrasure.
 
 ## Outbound connections
 
 The CLI itself makes only these connections:
 
 - `https://<account>.snowflakecomputing.com` for browser authentication and Snowflake SQL API requests.
+- The configured Databricks workspace host for Statement Execution API requests.
 - The configured Metabase URL when the optional Metabase integration is enabled.
 - `https://api.github.com/repos/EmbrasureAI/embrasure-cli/releases/latest` for `embrasure update --check`, `embrasure update`, and the gated doctor notice.
 - `https://github.com/EmbrasureAI/embrasure-cli/releases/download/...` when `embrasure update` downloads a release and its checksums.
 
-There is no telemetry or analytics SDK. `embrasure update` is opt-in. Human, interactive `embrasure doctor` output may check for a release at most once every 24 hours. The notice is disabled for JSON output, piped stderr, `CI`, or `NO_UPDATE_NOTIFIER`, and network failures are silent. The local `dbt` process may connect to Snowflake or download packages according to the dbt project's own configuration. Normal local validation does not contact Embrasure.
+There is no telemetry or analytics SDK. `embrasure update` is opt-in. Human, interactive `embrasure doctor` output may check for a release at most once every 24 hours. The notice is disabled for JSON output, piped stderr, `CI`, or `NO_UPDATE_NOTIFIER`, and network failures are silent. The local `dbt` process may connect to the configured warehouse or download packages according to the dbt project's own configuration. Normal local validation does not contact Embrasure.
 
 ## Data returned to the local process
 
-Snowflake returns the comparison evidence used in the local report:
+The configured warehouse returns the comparison evidence used in the local report:
 
 - Database, schema, table, and column names
-- Snowflake types
+- Warehouse column types
 - Row counts, null rates, cardinality, min/max values, averages, and percentiles
 - Counts of primary-key values found on only one side, duplicate rows, and null-key rows
 - Optional stably ordered primary-key and duplicate-key examples, up to `safety.primary_key_sample_limit`
@@ -44,12 +45,13 @@ Snowflake returns the comparison evidence used in the local report:
 
 Set `primary_key_sample_limit: 0` when key or query-diff example values must not appear in process memory or JSON output. Reports are written to stdout unless `--markdown <path>` is provided.
 
-Query checks accept a single read-only query expression, but syntax validation is not a side-effect sandbox for functions invoked by that query. Use a least-privilege Snowflake role that cannot call unsafe procedures, user-defined functions, or external integrations. Query materializations use a dedicated run-owned schema and follow the same ownership-checked cleanup path as model schemas.
+Query checks accept a single read-only query expression, but syntax validation is not a side-effect sandbox for functions invoked by that query. Use a least-privilege warehouse identity that cannot call unsafe procedures, user-defined functions, or external integrations. Query materializations use a dedicated run-owned schema and follow the same ownership-checked cleanup path as model schemas.
 
 ## Credentials and local files
 
-- The configuration file contains Snowflake identifiers and environment-variable names, not secret values.
+- The configuration file contains warehouse identifiers and environment-variable names, not secret values.
 - Programmatic access tokens and external OAuth tokens are read from environment variables.
+- Databricks tokens are read from the configured environment variable and sent only to the configured workspace host and the temporary dbt profile.
 - RSA private keys are read from the configured local path.
 - Browser OAuth sessions are cached under `~/.config/embrasure-check/oauth/` by default on Unix, with owner-only file and directory permissions. Windows sessions are encrypted for the current user with DPAPI and stored under `%APPDATA%\embrasure-check\oauth\`. Run `embrasure auth logout` to remove a cached session.
 - Temporary dbt profiles, manifests, target directories, and the detached base worktree live under an operating-system temporary directory and are removed after the process exits normally.
@@ -69,11 +71,13 @@ The [enterprise setup guide](enterprise.md) contains example grants. `embrasure 
 
 Incremental baselines use Snowflake table-level zero-copy clones. Embrasure never seeds them with CTAS, `INSERT`, or a local data copy. Clone metadata remains in Snowflake; only aggregate comparison results and bounded examples return to the local process.
 
+For Databricks, use a Unity Catalog SQL warehouse. The identity needs `USE CATALOG`, production schema/table read access, and permission to create schemas and tables in the configured catalog. Incremental baselines currently use managed Delta shallow clones; candidate seeding uses CTAS so it does not create an unsupported nested shallow clone.
+
 ## Schema cleanup
 
 Each run uses unique candidate and baseline schema names and writes an ownership marker to every schema. Cleanup requires both the exact run namespace and matching marker. The CLI refuses to drop a schema that fails either check.
 
-Schemas are dropped with `RESTRICT` instead of the Snowflake `CASCADE` default, so cleanup never removes foreign keys held by objects outside the schema. Because `RESTRICT` only warns, the CLI confirms the schema is gone before reporting it as removed.
+Snowflake schemas are dropped with `RESTRICT` instead of the Snowflake `CASCADE` default, so cleanup never removes foreign keys held by objects outside the schema. Databricks schemas are dropped with `CASCADE` only after both the run namespace and ownership marker are verified; the cascade is limited to objects inside that temporary Unity Catalog schema.
 
 Cleanup is attempted after success, findings, execution failures, Ctrl-C, and normal termination signals. No process can clean up after `SIGKILL`, a machine crash, or power loss. `embrasure clean` lists old marked schemas by default and removes them only with `--yes`. It searches only each configured account database and verifies both the configured prefix and an Embrasure ownership marker before removal.
 

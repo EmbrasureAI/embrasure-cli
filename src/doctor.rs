@@ -6,9 +6,11 @@ use uuid::Uuid;
 
 use crate::{
     auth,
-    config::Config,
+    config::{Config, DatabricksConfig, ProviderConfig, SnowflakeConfig},
+    databricks::DatabricksClient,
     dbt, lineage, metabase,
-    snowflake::{QueryResult, Relation, SnowflakeClient, quote_identifier},
+    provider::{QueryResult, Relation, SqlDialect, WarehouseProvider, dialect},
+    snowflake::{SnowflakeClient, quote_identifier},
     style::Style,
 };
 
@@ -59,7 +61,7 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
     }
 
     for account in &config.accounts {
-        let scope = format!("snowflake:{}", account.name);
+        let scope = format!("{}:{}", dialect(account).dbt_adapter_name(), account.name);
         let auth_status = match auth::status(account) {
             Ok(status) => status,
             Err(error) => {
@@ -85,152 +87,49 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
             }
         };
         let query_tag = format!("embrasure:doctor:{}", Uuid::new_v4());
-        let client = match SnowflakeClient::new(
-            account,
-            &resolved,
-            query_tag,
-            config.safety.statement_timeout_seconds,
-        ) {
-            Ok(client) => client,
-            Err(error) => {
-                report.fail(&scope, "authentication", format!("{error:#}"));
-                continue;
-            }
-        };
-        match client
-            .execute("SELECT CURRENT_ACCOUNT(), CURRENT_USER(), CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_DATABASE()")
-            .await
-        {
-            Ok(result) => match verify_session(account, &result) {
-                Ok(identity) => report.pass(&scope, "session", identity),
-                Err(error) => {
-                    report.fail(&scope, "session", format!("{error:#}"));
-                    continue;
-                }
-            },
-            Err(error) => {
-                report.fail(&scope, "session", format!("{error:#}"));
-                continue;
-            }
-        }
-        let mut clone_source = None;
-        let production = format!(
-            "SHOW TABLES IN SCHEMA {}.{}",
-            quote_identifier(&account.database),
-            quote_identifier(&account.production_schema)
-        );
-        match client.execute(&production).await {
-            Ok(tables) => {
-                let mut relations = relation_names(&tables);
-                clone_source = relations.first().cloned();
-                let views = format!(
-                    "SHOW VIEWS IN SCHEMA {}.{}",
-                    quote_identifier(&account.database),
-                    quote_identifier(&account.production_schema)
-                );
-                match client.execute(&views).await {
-                    Ok(views) => relations.extend(relation_names(&views)),
-                    Err(error) => {
-                        report.fail(&scope, "production_read", format!("{error:#}"));
-                        continue;
-                    }
-                }
-                relations.sort();
-                relations.dedup();
-                if let Some(relation) = relations.first() {
-                    let sample = format!(
-                        "SELECT * FROM {}.{}.{} LIMIT 0",
-                        quote_identifier(&account.database),
-                        quote_identifier(&account.production_schema),
-                        quote_identifier(relation)
-                    );
-                    match client.execute(&sample).await {
-                        Ok(_) => report.pass(
+        match &account.provider {
+            ProviderConfig::Snowflake(provider) => {
+                match SnowflakeClient::new(
+                    account,
+                    &resolved,
+                    query_tag,
+                    config.safety.statement_timeout_seconds,
+                ) {
+                    Ok(client) => {
+                        check_snowflake(
+                            &client,
+                            provider,
                             &scope,
-                            "production_read",
-                            format!(
-                                "can read production; {} visible table(s) or view(s)",
-                                relations.len()
-                            ),
-                        ),
-                        Err(error) => report.fail(&scope, "production_read", format!("{error:#}")),
-                    }
-                } else {
-                    report.pass(
-                        &scope,
-                        "production_read",
-                        "production schema is visible but contains no tables or views",
-                    );
-                }
-            }
-            Err(error) => report.fail(&scope, "production_read", format!("{error:#}")),
-        }
-
-        if write_test {
-            let schema = format!(
-                "{}_DOCTOR_{}",
-                config.safety.schema_prefix.to_ascii_uppercase(),
-                Uuid::new_v4().simple()
-            );
-            match client.create_schema(&account.database, &schema).await {
-                Ok(()) => {
-                    if let Some(identifier) = clone_source {
-                        let source = Relation {
-                            database: account.database.clone(),
-                            schema: account.production_schema.clone(),
-                            identifier,
-                        };
-                        let target = Relation {
-                            database: account.database.clone(),
-                            schema: schema.clone(),
-                            identifier: "EMBRASURE_CLONE_CHECK".into(),
-                        };
-                        match client.clone_table(&source, &target).await {
-                            Ok(()) => report.pass(
-                                &scope,
-                                "incremental_clone",
-                                "can zero-copy clone a production table",
-                            ),
-                            Err(error) => report.fail(
-                                &scope,
-                                "incremental_clone",
-                                format!(
-                                    "cannot clone a production table: {error:#}; confirm the relation type and update grants"
-                                ),
-                            ),
-                        }
-                    } else {
-                        report.skip(
-                            &scope,
-                            "incremental_clone",
-                            "no production table was available to test (views cannot be cloned)",
-                        );
-                    }
-                    match client
-                        .drop_schema(&account.database, &schema, &schema)
+                            &config.safety.schema_prefix,
+                            write_test,
+                            &mut report,
+                        )
                         .await
-                    {
-                        Ok(()) => report.pass(
-                            &scope,
-                            "ci_schema_lifecycle",
-                            "created and removed a temporary schema",
-                        ),
-                        Err(error) => report.fail(
-                            &scope,
-                            "ci_schema_lifecycle",
-                            format!("created {schema}, but cleanup failed: {error:#}"),
-                        ),
                     }
+                    Err(error) => report.fail(&scope, "authentication", format!("{error:#}")),
                 }
-                Err(error) => report.fail(
-                    &scope,
-                    "ci_schema_lifecycle",
-                    format!("could not create a temporary schema: {error:#}"),
-                ),
             }
-        } else {
-            report.skip(&scope, "ci_schema_lifecycle", "skipped by --read-only");
-            report.skip(&scope, "incremental_clone", "skipped by --read-only");
+            ProviderConfig::Databricks(provider) => {
+                match DatabricksClient::new(
+                    account,
+                    &resolved,
+                    query_tag,
+                    config.safety.statement_timeout_seconds,
+                ) {
+                    Ok(client) => {
+                        check_databricks(
+                            &client,
+                            provider,
+                            &scope,
+                            &config.safety.schema_prefix,
+                            write_test,
+                            &mut report,
+                        )
+                        .await
+                    }
+                    Err(error) => report.fail(&scope, "authentication", format!("{error:#}")),
+                }
+            }
         }
     }
 
@@ -249,7 +148,272 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
     report
 }
 
-fn verify_session(account: &crate::config::AccountConfig, result: &QueryResult) -> Result<String> {
+async fn check_snowflake(
+    client: &SnowflakeClient,
+    account: &SnowflakeConfig,
+    scope: &str,
+    schema_prefix: &str,
+    write_test: bool,
+    report: &mut DoctorReport,
+) {
+    match client
+        .execute("SELECT CURRENT_ACCOUNT(), CURRENT_USER(), CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_DATABASE()")
+        .await
+    {
+        Ok(result) => match verify_snowflake_session(account, &result) {
+            Ok(identity) => report.pass(scope, "session", identity),
+            Err(error) => {
+                report.fail(scope, "session", format!("{error:#}"));
+                return;
+            }
+        },
+        Err(error) => {
+            report.fail(scope, "session", format!("{error:#}"));
+            return;
+        }
+    }
+    let mut clone_source = None;
+    let production = format!(
+        "SHOW TABLES IN SCHEMA {}.{}",
+        quote_identifier(&account.database),
+        quote_identifier(&account.production_schema)
+    );
+    match client.execute(&production).await {
+        Ok(tables) => {
+            let mut relations = relation_names(&tables);
+            clone_source = relations.first().cloned();
+            let views = format!(
+                "SHOW VIEWS IN SCHEMA {}.{}",
+                quote_identifier(&account.database),
+                quote_identifier(&account.production_schema)
+            );
+            match client.execute(&views).await {
+                Ok(views) => relations.extend(relation_names(&views)),
+                Err(error) => {
+                    report.fail(scope, "production_read", format!("{error:#}"));
+                    return;
+                }
+            }
+            relations.sort();
+            relations.dedup();
+            check_readable_relation(
+                client,
+                SqlDialect::Snowflake,
+                &account.database,
+                &account.production_schema,
+                &relations,
+                scope,
+                report,
+            )
+            .await;
+        }
+        Err(error) => report.fail(scope, "production_read", format!("{error:#}")),
+    }
+    check_schema_lifecycle(
+        client,
+        SqlDialect::Snowflake,
+        &account.database,
+        &account.production_schema,
+        schema_prefix,
+        clone_source,
+        scope,
+        write_test,
+        report,
+    )
+    .await;
+}
+
+async fn check_databricks(
+    client: &DatabricksClient,
+    account: &DatabricksConfig,
+    scope: &str,
+    schema_prefix: &str,
+    write_test: bool,
+    report: &mut DoctorReport,
+) {
+    match client
+        .execute("SELECT CURRENT_USER(), CURRENT_CATALOG(), CURRENT_SCHEMA()")
+        .await
+    {
+        Ok(result) => match verify_databricks_session(account, &result) {
+            Ok(identity) => report.pass(scope, "session", identity),
+            Err(error) => {
+                report.fail(scope, "session", format!("{error:#}"));
+                return;
+            }
+        },
+        Err(error) => {
+            report.fail(scope, "session", format!("{error:#}"));
+            return;
+        }
+    }
+    let dialect = SqlDialect::Databricks;
+    let tables = client
+        .execute(&format!(
+            "SELECT TABLE_NAME, TABLE_TYPE, DATA_SOURCE_FORMAT FROM {}.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{}' ORDER BY TABLE_NAME",
+            dialect.quote_identifier(&account.catalog),
+            dialect
+                .normalize_identifier(&account.production_schema, None)
+                .replace('\'', "''")
+        ))
+        .await;
+    let mut clone_source = None;
+    match tables {
+        Ok(tables) => {
+            let relations = tables
+                .rows
+                .iter()
+                .filter_map(|row| row.first().and_then(|value| value.clone()))
+                .collect::<Vec<_>>();
+            clone_source = tables.rows.iter().find_map(|row| {
+                let kind = row.get(1)?.as_deref()?;
+                let format = row.get(2)?.as_deref()?;
+                (kind.eq_ignore_ascii_case("MANAGED") && format.eq_ignore_ascii_case("DELTA"))
+                    .then(|| row.first().and_then(|value| value.clone()))
+                    .flatten()
+            });
+            check_readable_relation(
+                client,
+                dialect,
+                &account.catalog,
+                &account.production_schema,
+                &relations,
+                scope,
+                report,
+            )
+            .await;
+        }
+        Err(error) => report.fail(scope, "production_read", format!("{error:#}")),
+    }
+    check_schema_lifecycle(
+        client,
+        dialect,
+        &account.catalog,
+        &account.production_schema,
+        schema_prefix,
+        clone_source,
+        scope,
+        write_test,
+        report,
+    )
+    .await;
+}
+
+async fn check_readable_relation<E: crate::provider::QueryExecutor + ?Sized>(
+    client: &E,
+    dialect: SqlDialect,
+    database: &str,
+    production_schema: &str,
+    relations: &[String],
+    scope: &str,
+    report: &mut DoctorReport,
+) {
+    if let Some(identifier) = relations.first() {
+        let relation = Relation {
+            database: database.to_owned(),
+            schema: production_schema.to_owned(),
+            identifier: identifier.clone(),
+        };
+        match client
+            .execute(&format!("SELECT * FROM {} LIMIT 0", relation.sql(dialect)))
+            .await
+        {
+            Ok(_) => report.pass(
+                scope,
+                "production_read",
+                format!(
+                    "can read production; {} visible table(s) or view(s)",
+                    relations.len()
+                ),
+            ),
+            Err(error) => report.fail(scope, "production_read", format!("{error:#}")),
+        }
+    } else {
+        report.pass(
+            scope,
+            "production_read",
+            "production schema is visible but contains no tables or views",
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn check_schema_lifecycle<P: WarehouseProvider + ?Sized>(
+    client: &P,
+    dialect: SqlDialect,
+    database: &str,
+    production_schema: &str,
+    schema_prefix: &str,
+    clone_source: Option<String>,
+    scope: &str,
+    write_test: bool,
+    report: &mut DoctorReport,
+) {
+    if !write_test {
+        report.skip(scope, "ci_schema_lifecycle", "skipped by --read-only");
+        report.skip(scope, "incremental_clone", "skipped by --read-only");
+        return;
+    }
+    let schema = dialect.normalize_identifier(
+        &format!("{schema_prefix}_DOCTOR_{}", Uuid::new_v4().simple()),
+        None,
+    );
+    match client.create_schema(database, &schema).await {
+        Ok(()) => {
+            if let Some(identifier) = clone_source {
+                let source = Relation {
+                    database: database.to_owned(),
+                    schema: production_schema.to_owned(),
+                    identifier,
+                };
+                let target = Relation {
+                    database: database.to_owned(),
+                    schema: schema.clone(),
+                    identifier: dialect.normalize_identifier("EMBRASURE_CLONE_CHECK", None),
+                };
+                match client.copy_table(&source, &target).await {
+                    Ok(()) => report.pass(
+                        scope,
+                        "incremental_clone",
+                        "can create an isolated snapshot copy of a production table",
+                    ),
+                    Err(error) => report.fail(
+                        scope,
+                        "incremental_clone",
+                        format!(
+                            "cannot copy a production table: {error:#}; confirm the relation type and update grants"
+                        ),
+                    ),
+                }
+            } else {
+                report.skip(
+                    scope,
+                    "incremental_clone",
+                    "no supported production table was available to test",
+                );
+            }
+            match client.drop_schema(database, &schema, &schema).await {
+                Ok(()) => report.pass(
+                    scope,
+                    "ci_schema_lifecycle",
+                    "created and removed a temporary schema",
+                ),
+                Err(error) => report.fail(
+                    scope,
+                    "ci_schema_lifecycle",
+                    format!("created {schema}, but cleanup failed: {error:#}"),
+                ),
+            }
+        }
+        Err(error) => report.fail(
+            scope,
+            "ci_schema_lifecycle",
+            format!("could not create a temporary schema: {error:#}"),
+        ),
+    }
+}
+
+fn verify_snowflake_session(account: &SnowflakeConfig, result: &QueryResult) -> Result<String> {
     let row = result
         .rows
         .first()
@@ -275,6 +439,36 @@ fn verify_session(account: &crate::config::AccountConfig, result: &QueryResult) 
         if !actual.eq_ignore_ascii_case(expected) {
             bail!(
                 "requested {label} {expected}, but Snowflake activated {actual}; check grants and configuration"
+            );
+        }
+    }
+    Ok(values.join(" / "))
+}
+
+fn verify_databricks_session(account: &DatabricksConfig, result: &QueryResult) -> Result<String> {
+    let row = result
+        .rows
+        .first()
+        .context("Databricks session query returned no rows")?;
+    let values = (0..3)
+        .map(|index| {
+            row.get(index)
+                .and_then(|value| value.as_deref())
+                .with_context(|| {
+                    format!(
+                        "Databricks session query returned NULL at column {}",
+                        index + 1
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (label, actual, expected) in [
+        ("catalog", values[1], account.catalog.as_str()),
+        ("schema", values[2], account.production_schema.as_str()),
+    ] {
+        if !actual.eq_ignore_ascii_case(expected) {
+            bail!(
+                "requested {label} {expected}, but Databricks activated {actual}; check grants and configuration"
             );
         }
     }
@@ -398,7 +592,7 @@ impl DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::AuthConfig, snowflake::ResultColumn};
+    use crate::{config::AuthConfig, provider::ResultColumn};
 
     #[test]
     fn a_failure_makes_the_report_not_ready() {
@@ -415,15 +609,13 @@ mod tests {
 
     #[test]
     fn session_check_rejects_a_role_snowflake_did_not_activate() {
-        let account = crate::config::AccountConfig {
-            name: "one".into(),
+        let account = SnowflakeConfig {
             account: "org-account".into(),
             user: "CI_USER".into(),
             role: "DBT_CI".into(),
             database: "ANALYTICS".into(),
             warehouse: "DBT_CI_WH".into(),
             production_schema: "PROD".into(),
-            selector: None,
             auth: AuthConfig::Oauth {
                 token_env: "TOKEN".into(),
             },
@@ -444,7 +636,7 @@ mod tests {
             ]],
         };
         assert!(
-            verify_session(&account, &result)
+            verify_snowflake_session(&account, &result)
                 .unwrap_err()
                 .to_string()
                 .contains("role")

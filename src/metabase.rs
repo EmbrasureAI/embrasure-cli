@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use crate::{
     config::MetabaseConfig,
+    provider::Relation,
     report::{CoverageGap, ImpactedAsset},
-    snowflake::Relation,
 };
 
 pub async fn find_dashboard_impact(

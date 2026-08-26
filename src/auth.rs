@@ -14,7 +14,9 @@ use tokio::net::TcpListener;
 use url::Url;
 
 use crate::{
-    config::{AccountConfig, AuthConfig, Config},
+    config::{
+        AccountConfig, AuthConfig, Config, DatabricksAuthConfig, ProviderConfig, SnowflakeConfig,
+    },
     loopback, update,
 };
 
@@ -22,6 +24,12 @@ const LOCAL_CLIENT_ID: &str = "LOCAL_APPLICATION";
 
 #[derive(Debug, Clone)]
 pub enum ResolvedAuth {
+    Snowflake(SnowflakeResolvedAuth),
+    Databricks(DatabricksResolvedAuth),
+}
+
+#[derive(Debug, Clone)]
+pub enum SnowflakeResolvedAuth {
     OAuth {
         token: String,
     },
@@ -32,6 +40,11 @@ pub enum ResolvedAuth {
     ProgrammaticAccessToken {
         token: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum DatabricksResolvedAuth {
+    Token { token: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,8 +80,39 @@ pub async fn resolve_all(config: &Config) -> Result<BTreeMap<String, ResolvedAut
     Ok(result)
 }
 
+pub fn placeholder(account: &AccountConfig) -> ResolvedAuth {
+    match &account.provider {
+        ProviderConfig::Snowflake(_) => {
+            ResolvedAuth::Snowflake(SnowflakeResolvedAuth::ProgrammaticAccessToken {
+                token: "dry-run-not-used".into(),
+            })
+        }
+        ProviderConfig::Databricks(_) => ResolvedAuth::Databricks(DatabricksResolvedAuth::Token {
+            token: "dry-run-not-used".into(),
+        }),
+    }
+}
+
 pub async fn resolve(account: &AccountConfig) -> Result<ResolvedAuth> {
-    match &account.auth {
+    match &account.provider {
+        ProviderConfig::Snowflake(config) => Ok(ResolvedAuth::Snowflake(
+            resolve_snowflake(account, config).await?,
+        )),
+        ProviderConfig::Databricks(config) => match &config.auth {
+            DatabricksAuthConfig::Token { token_env } => {
+                Ok(ResolvedAuth::Databricks(DatabricksResolvedAuth::Token {
+                    token: required_env(token_env, "Databricks token")?,
+                }))
+            }
+        },
+    }
+}
+
+async fn resolve_snowflake(
+    account: &AccountConfig,
+    config: &SnowflakeConfig,
+) -> Result<SnowflakeResolvedAuth> {
+    match &config.auth {
         AuthConfig::OauthLocal => {
             let token = load_or_refresh_local_token(account).await.with_context(|| {
                 format!(
@@ -76,20 +120,20 @@ pub async fn resolve(account: &AccountConfig) -> Result<ResolvedAuth> {
                     account.name, account.name
                 )
             })?;
-            Ok(ResolvedAuth::OAuth { token })
+            Ok(SnowflakeResolvedAuth::OAuth { token })
         }
-        AuthConfig::Oauth { token_env } => Ok(ResolvedAuth::OAuth {
+        AuthConfig::Oauth { token_env } => Ok(SnowflakeResolvedAuth::OAuth {
             token: required_env(token_env, "OAuth token")?,
         }),
         AuthConfig::ProgrammaticAccessToken { token_env } => {
-            Ok(ResolvedAuth::ProgrammaticAccessToken {
+            Ok(SnowflakeResolvedAuth::ProgrammaticAccessToken {
                 token: required_env(token_env, "Snowflake PAT")?,
             })
         }
         AuthConfig::KeyPair {
             private_key_path,
             passphrase_env,
-        } => Ok(ResolvedAuth::KeyPair {
+        } => Ok(SnowflakeResolvedAuth::KeyPair {
             private_key_path: private_key_path.clone(),
             passphrase: passphrase_env
                 .as_ref()
@@ -103,11 +147,14 @@ pub async fn login_from_config(config_path: &Path, requested: Option<&str>) -> R
     let mut config = Config::load(config_path)?;
     config.resolve_from(config_path)?;
     let account = select_account(&config, requested)?;
-    if !matches!(account.auth, AuthConfig::OauthLocal) {
+    let snowflake = account
+        .snowflake()
+        .context("browser login is only available for Snowflake accounts")?;
+    if !matches!(snowflake.auth, AuthConfig::OauthLocal) {
         bail!(
             "account {} uses {}; browser login requires `auth: {{ type: oauth_local }}`",
             account.name,
-            method_name(&account.auth)
+            method_name(&snowflake.auth)
         );
     }
     login(account).await?;
@@ -118,7 +165,10 @@ pub fn logout_from_config(config_path: &Path, requested: Option<&str>) -> Result
     let mut config = Config::load(config_path)?;
     config.resolve_from(config_path)?;
     let account = select_account(&config, requested)?;
-    if !matches!(account.auth, AuthConfig::OauthLocal) {
+    let snowflake = account
+        .snowflake()
+        .context("browser logout is only available for Snowflake accounts")?;
+    if !matches!(snowflake.auth, AuthConfig::OauthLocal) {
         bail!("account {} does not use browser login", account.name);
     }
     let path = token_path(account)?;
@@ -136,7 +186,25 @@ pub fn status_from_config(config_path: &Path) -> Result<Vec<AuthStatus>> {
 }
 
 pub fn status(account: &AccountConfig) -> Result<AuthStatus> {
-    let (method, ready, message) = match &account.auth {
+    let (method, ready, message) = match &account.provider {
+        ProviderConfig::Snowflake(config) => snowflake_status(account, config)?,
+        ProviderConfig::Databricks(config) => match &config.auth {
+            DatabricksAuthConfig::Token { token_env } => env_status("token", token_env),
+        },
+    };
+    Ok(AuthStatus {
+        account: account.name.clone(),
+        method,
+        ready,
+        status: message,
+    })
+}
+
+fn snowflake_status(
+    account: &AccountConfig,
+    config: &SnowflakeConfig,
+) -> Result<(&'static str, bool, String)> {
+    let status = match &config.auth {
         AuthConfig::OauthLocal => match load_cached(account) {
             Ok(token) if token.expires_at > now()? => ("oauth_local", true, "signed in".into()),
             Ok(token) if token.refresh_token.is_some() => (
@@ -176,12 +244,7 @@ pub fn status(account: &AccountConfig) -> Result<AuthStatus> {
             ("key_pair", ready, message)
         }
     };
-    Ok(AuthStatus {
-        account: account.name.clone(),
-        method,
-        ready,
-        status: message,
-    })
+    Ok(status)
 }
 
 fn env_status(method: &'static str, name: &str) -> (&'static str, bool, String) {
@@ -216,6 +279,7 @@ fn select_account<'a>(config: &'a Config, requested: Option<&str>) -> Result<&'a
 }
 
 async fn login(account: &AccountConfig) -> Result<String> {
+    let snowflake = snowflake(account)?;
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .context("could not start the local OAuth callback listener")?;
@@ -226,10 +290,10 @@ async fn login(account: &AccountConfig) -> Result<String> {
     let redirect_uri = format!("http://127.0.0.1:{port}");
     let (verifier, challenge) = loopback::pkce_pair();
     let state = loopback::random_string(32);
-    let scope = format!("refresh_token session:role:{}", account.role);
+    let scope = format!("refresh_token session:role:{}", snowflake.role);
     let mut authorize = Url::parse(&format!(
         "https://{}/oauth/authorize",
-        account_host(&account.account)
+        account_host(&snowflake.account)
     ))?;
     authorize
         .query_pairs_mut()
@@ -326,10 +390,11 @@ async fn load_or_refresh_local_token(account: &AccountConfig) -> Result<String> 
 }
 
 async fn token_request(account: &AccountConfig, form: &[(&str, &str)]) -> Result<TokenResponse> {
+    let snowflake = snowflake(account)?;
     let response = update::http_client()?
         .post(format!(
             "https://{}/oauth/token-request",
-            account_host(&account.account)
+            account_host(&snowflake.account)
         ))
         .form(form)
         .send()
@@ -350,6 +415,7 @@ async fn token_request(account: &AccountConfig, form: &[(&str, &str)]) -> Result
 }
 
 fn load_cached(account: &AccountConfig) -> Result<CachedToken> {
+    let snowflake = snowflake(account)?;
     let path = token_path(account)?;
     let bytes = fs::read(&path)
         .with_context(|| format!("no cached Snowflake session at {}", path.display()))?;
@@ -357,20 +423,21 @@ fn load_cached(account: &AccountConfig) -> Result<CachedToken> {
         .with_context(|| format!("could not decrypt Snowflake session at {}", path.display()))?;
     let token: CachedToken = serde_json::from_slice(&bytes)
         .with_context(|| format!("invalid cached Snowflake session at {}", path.display()))?;
-    if token.account != account.account || !token.user.eq_ignore_ascii_case(&account.user) {
+    if token.account != snowflake.account || !token.user.eq_ignore_ascii_case(&snowflake.user) {
         bail!("cached Snowflake session belongs to a different account or user");
     }
     Ok(token)
 }
 
 fn save_cached(account: &AccountConfig, response: &TokenResponse) -> Result<()> {
+    let snowflake = snowflake(account)?;
     let path = token_path(account)?;
     let parent = path.parent().context("OAuth cache path has no parent")?;
     fs::create_dir_all(parent)?;
     restrict_directory(parent)?;
     let token = CachedToken {
-        account: account.account.clone(),
-        user: account.user.clone(),
+        account: snowflake.account.clone(),
+        user: snowflake.user.clone(),
         access_token: response.access_token.clone(),
         refresh_token: response.refresh_token.clone(),
         expires_at: now()?.saturating_add(response.expires_in.saturating_sub(30)),
@@ -380,12 +447,17 @@ fn save_cached(account: &AccountConfig, response: &TokenResponse) -> Result<()> 
 }
 
 fn token_path(account: &AccountConfig) -> Result<PathBuf> {
+    let snowflake = snowflake(account)?;
     let root = if let Some(value) = env::var_os("EMBRASURE_CHECK_CONFIG_DIR") {
         PathBuf::from(value)
     } else {
         default_config_root()?
     };
-    let identity = format!("{}:{}", account.account, account.user.to_ascii_uppercase());
+    let identity = format!(
+        "{}:{}",
+        snowflake.account,
+        snowflake.user.to_ascii_uppercase()
+    );
     let digest = Sha256::digest(identity.as_bytes());
     let name = digest
         .iter()
@@ -546,6 +618,12 @@ fn method_name(auth: &AuthConfig) -> &'static str {
         AuthConfig::ProgrammaticAccessToken { .. } => "programmatic_access_token",
         AuthConfig::KeyPair { .. } => "key_pair",
     }
+}
+
+fn snowflake(account: &AccountConfig) -> Result<&SnowflakeConfig> {
+    account
+        .snowflake()
+        .context("Snowflake authentication was requested for a different provider")
 }
 
 pub fn account_host(account: &str) -> String {

@@ -1,19 +1,18 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    future::Future,
-    pin::Pin,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
 use crate::{
     config::SafetyConfig,
+    provider::{QueryExecutor, Relation, ResultColumn, SqlDialect},
     report::{
         QueryCheckReport, QueryCheckStatus, QueryColumnComparison, QueryColumnMismatch,
         QueryComparison, QueryDiffExample,
     },
-    snowflake::{QueryResult, Relation, ResultColumn, SnowflakeClient, quote_identifier},
 };
+
+#[cfg(test)]
+use crate::provider::{ProviderFuture, QueryResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct RefTarget {
@@ -406,22 +405,6 @@ fn starts(bytes: &[u8], index: usize, value: &[u8]) -> bool {
     bytes.get(index..index + value.len()) == Some(value)
 }
 
-pub(crate) trait QueryExecutor: Send + Sync {
-    fn execute<'a>(
-        &'a self,
-        statement: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<QueryResult>> + Send + 'a>>;
-}
-
-impl QueryExecutor for SnowflakeClient {
-    fn execute<'a>(
-        &'a self,
-        statement: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<QueryResult>> + Send + 'a>> {
-        Box::pin(SnowflakeClient::execute(self, statement))
-    }
-}
-
 pub(crate) struct QueryDiffInput<'a> {
     pub name: &'a str,
     pub account: &'a str,
@@ -441,10 +424,11 @@ struct ExampleLimits {
     value_chars: usize,
 }
 
-pub(crate) async fn run_query_diff<E: QueryExecutor>(
+pub(crate) async fn run_query_diff<E: QueryExecutor + ?Sized>(
     executor: &E,
     input: QueryDiffInput<'_>,
 ) -> Result<QueryCheckReport> {
+    let dialect = executor.dialect();
     let mut report = QueryCheckReport {
         name: input.name.into(),
         account: input.account.into(),
@@ -452,8 +436,8 @@ pub(crate) async fn run_query_diff<E: QueryExecutor>(
         current_refs: input.current_refs,
         production_refs: input.production_refs,
         primary_key: input.primary_key.to_vec(),
-        candidate_relation: Some(input.candidate.sql()),
-        production_relation: Some(input.production.sql()),
+        candidate_relation: Some(input.candidate.sql(dialect)),
+        production_relation: Some(input.production.sql(dialect)),
         candidate_row_count: None,
         production_row_count: None,
         columns: vec![],
@@ -464,9 +448,14 @@ pub(crate) async fn run_query_diff<E: QueryExecutor>(
     };
     let candidate_columns = preflight(executor, input.candidate_sql).await?;
     let production_columns = preflight(executor, input.production_sql).await?;
-    report.invalid_primary_key_reason =
-        primary_key_metadata_error(input.primary_key, &candidate_columns, &production_columns);
+    report.invalid_primary_key_reason = primary_key_metadata_error(
+        dialect,
+        input.primary_key,
+        &candidate_columns,
+        &production_columns,
+    );
     if let Some(failure) = validate_preflight(
+        dialect,
         &candidate_columns,
         &production_columns,
         input.safety.max_columns_per_model,
@@ -477,18 +466,16 @@ pub(crate) async fn run_query_diff<E: QueryExecutor>(
     }
 
     executor
-        .execute(&format!(
-            "CREATE TRANSIENT TABLE {} AS SELECT * FROM (\n{}\n)",
-            input.candidate.sql(),
-            input.candidate_sql
+        .execute(&dialect.create_table_as(
+            input.candidate,
+            &format!("SELECT * FROM (\n{}\n)", input.candidate_sql),
         ))
         .await
         .context("could not materialize candidate query")?;
     executor
-        .execute(&format!(
-            "CREATE TRANSIENT TABLE {} AS SELECT * FROM (\n{}\n)",
-            input.production.sql(),
-            input.production_sql
+        .execute(&dialect.create_table_as(
+            input.production,
+            &format!("SELECT * FROM (\n{}\n)", input.production_sql),
         ))
         .await
         .context("could not materialize production query")?;
@@ -604,7 +591,10 @@ pub(crate) async fn run_query_diff<E: QueryExecutor>(
     Ok(report)
 }
 
-async fn preflight<E: QueryExecutor>(executor: &E, sql: &str) -> Result<Vec<ResultColumn>> {
+async fn preflight<E: QueryExecutor + ?Sized>(
+    executor: &E,
+    sql: &str,
+) -> Result<Vec<ResultColumn>> {
     Ok(executor
         .execute(&format!("SELECT * FROM (\n{sql}\n) LIMIT 0"))
         .await?
@@ -612,6 +602,7 @@ async fn preflight<E: QueryExecutor>(executor: &E, sql: &str) -> Result<Vec<Resu
 }
 
 fn validate_preflight(
+    dialect: SqlDialect,
     candidate: &[ResultColumn],
     production: &[ResultColumn],
     max_columns: usize,
@@ -628,7 +619,7 @@ fn validate_preflight(
         }
         let mut names = BTreeSet::new();
         for column in columns {
-            if unsupported_type(&column.data_type) {
+            if dialect.is_unsupported_value(&column.data_type) {
                 return Some(format!(
                     "{side} query column {} has unsupported type {}; cast semi-structured, vector, or geospatial values to a scalar type",
                     column.name, column.data_type
@@ -652,6 +643,7 @@ fn validate_preflight(
 }
 
 fn primary_key_metadata_error(
+    dialect: SqlDialect,
     configured: &[String],
     candidate: &[ResultColumn],
     production: &[ResultColumn],
@@ -675,8 +667,8 @@ fn primary_key_metadata_error(
                         "primary-key column {key} has incompatible types {} and {}",
                         candidate.data_type, production.data_type
                     ))
-                } else if unsupported_type(&candidate.data_type)
-                    || unsupported_type(&production.data_type)
+                } else if dialect.is_unsupported_value(&candidate.data_type)
+                    || dialect.is_unsupported_value(&production.data_type)
                 {
                     Some(format!(
                         "primary-key column {key} has unsupported type {}",
@@ -747,28 +739,17 @@ fn column_map(columns: &[ResultColumn]) -> BTreeMap<String, &ResultColumn> {
         .collect()
 }
 
-fn unsupported_type(data_type: &str) -> bool {
-    matches!(
-        data_type
-            .split(['(', ' '])
-            .next()
-            .unwrap_or(data_type)
-            .to_ascii_uppercase()
-            .as_str(),
-        "ARRAY" | "OBJECT" | "VARIANT" | "GEOGRAPHY" | "GEOMETRY" | "MAP" | "VECTOR"
-    )
-}
-
-async fn row_counts<E: QueryExecutor>(
+async fn row_counts<E: QueryExecutor + ?Sized>(
     executor: &E,
     candidate: &Relation,
     production: &Relation,
 ) -> Result<(u64, u64)> {
+    let dialect = executor.dialect();
     let result = executor
         .execute(&format!(
             "SELECT (SELECT COUNT(*) FROM {}), (SELECT COUNT(*) FROM {})",
-            candidate.sql(),
-            production.sql()
+            candidate.sql(dialect),
+            production.sql(dialect)
         ))
         .await?;
     let row = result
@@ -807,16 +788,17 @@ fn resolve_keys<'a>(
     Ok(resolved)
 }
 
-async fn key_integrity<E: QueryExecutor>(
+async fn key_integrity<E: QueryExecutor + ?Sized>(
     executor: &E,
     relation: &Relation,
     keys: &[ColumnPair<'_>],
     candidate_side: bool,
 ) -> Result<(u64, u64, u64)> {
+    let dialect = executor.dialect();
     let names = keys
         .iter()
         .map(|pair| {
-            quote_identifier(if candidate_side {
+            dialect.quote_identifier(if candidate_side {
                 &pair.0.name
             } else {
                 &pair.1.name
@@ -828,14 +810,22 @@ async fn key_integrity<E: QueryExecutor>(
         .map(|name| format!("{name} IS NULL"))
         .collect::<Vec<_>>()
         .join(" OR ");
+    let duplicate_keys =
+        dialect.conditional(&format!("NOT ({nulls}) AND __EMBRASURE_N > 1"), "1", "0");
+    let duplicate_rows = dialect.conditional(
+        &format!("NOT ({nulls}) AND __EMBRASURE_N > 1"),
+        "__EMBRASURE_N - 1",
+        "0",
+    );
+    let null_rows = dialect.conditional(&format!("({nulls})"), "__EMBRASURE_N", "0");
     let result = executor
         .execute(&format!(
-            "SELECT COALESCE(SUM(IFF(NOT ({nulls}) AND __EMBRASURE_N > 1, 1, 0)), 0), \
-             COALESCE(SUM(IFF(NOT ({nulls}) AND __EMBRASURE_N > 1, __EMBRASURE_N - 1, 0)), 0), \
-             COALESCE(SUM(IFF(({nulls}), __EMBRASURE_N, 0)), 0) \
+            "SELECT COALESCE(SUM({duplicate_keys}), 0), \
+             COALESCE(SUM({duplicate_rows}), 0), \
+             COALESCE(SUM({null_rows}), 0) \
              FROM (SELECT {}, COUNT(*) AS __EMBRASURE_N FROM {} GROUP BY {})",
             names.join(", "),
-            relation.sql(),
+            relation.sql(dialect),
             names.join(", ")
         ))
         .await?;
@@ -850,7 +840,7 @@ async fn key_integrity<E: QueryExecutor>(
     ))
 }
 
-async fn key_integrity_examples<E: QueryExecutor>(
+async fn key_integrity_examples<E: QueryExecutor + ?Sized>(
     executor: &E,
     candidate: &Relation,
     production: &Relation,
@@ -861,17 +851,18 @@ async fn key_integrity_examples<E: QueryExecutor>(
     if limits.rows == 0 {
         return Ok(vec![]);
     }
+    let dialect = executor.dialect();
     let canonical = keys
         .iter()
-        .map(|pair| quote_identifier(&pair.0.name))
+        .map(|pair| dialect.quote_identifier(&pair.0.name))
         .collect::<Vec<_>>();
     let candidate_keys = keys
         .iter()
         .map(|pair| {
             format!(
                 "{} AS {}",
-                quote_identifier(&pair.0.name),
-                quote_identifier(&pair.0.name)
+                dialect.quote_identifier(&pair.0.name),
+                dialect.quote_identifier(&pair.0.name)
             )
         })
         .collect::<Vec<_>>();
@@ -880,8 +871,8 @@ async fn key_integrity_examples<E: QueryExecutor>(
         .map(|pair| {
             format!(
                 "{} AS {}",
-                quote_identifier(&pair.1.name),
-                quote_identifier(&pair.0.name)
+                dialect.quote_identifier(&pair.1.name),
+                dialect.quote_identifier(&pair.0.name)
             )
         })
         .collect::<Vec<_>>();
@@ -892,7 +883,7 @@ async fn key_integrity_examples<E: QueryExecutor>(
         .join(" OR ");
     let values = keys
         .iter()
-        .map(|pair| bounded_value("X", &pair.0.name, limits.value_chars))
+        .map(|pair| bounded_value(dialect, "X", &pair.0.name, limits.value_chars))
         .collect::<Vec<_>>();
     let ordering = canonical
         .iter()
@@ -909,15 +900,16 @@ async fn key_integrity_examples<E: QueryExecutor>(
                UNION ALL \
                SELECT 'production' AS __EMBRASURE_SIDE, * FROM P_KEYS WHERE __EMBRASURE_N > 1 OR ({nulls})\
              ) \
-             SELECT X.__EMBRASURE_SIDE, {}, X.__EMBRASURE_N::VARCHAR FROM ISSUES X \
+             SELECT X.__EMBRASURE_SIDE, {}, {} FROM ISSUES X \
              ORDER BY {ordering} LIMIT {}",
             candidate_keys.join(", "),
-            candidate.sql(),
+            candidate.sql(dialect),
             canonical.join(", "),
             production_keys.join(", "),
-            production.sql(),
+            production.sql(dialect),
             canonical.join(", "),
             values.join(", "),
+            dialect.cast_text("X.__EMBRASURE_N"),
             limits.rows
         ))
         .await?;
@@ -944,7 +936,7 @@ async fn key_integrity_examples<E: QueryExecutor>(
         .collect()
 }
 
-async fn compare_keyed<E: QueryExecutor>(
+async fn compare_keyed<E: QueryExecutor + ?Sized>(
     executor: &E,
     candidate: &Relation,
     production: &Relation,
@@ -953,13 +945,13 @@ async fn compare_keyed<E: QueryExecutor>(
     limits: ExampleLimits,
     examples_truncated: &mut bool,
 ) -> Result<QueryComparison> {
+    let dialect = executor.dialect();
     let join = keys
         .iter()
         .map(|pair| {
-            format!(
-                "EQUAL_NULL(C.{}, P.{})",
-                quote_identifier(&pair.0.name),
-                quote_identifier(&pair.1.name)
+            dialect.null_safe_equal(
+                &format!("C.{}", dialect.quote_identifier(&pair.0.name)),
+                &format!("P.{}", dialect.quote_identifier(&pair.1.name)),
             )
         })
         .collect::<Vec<_>>()
@@ -980,35 +972,61 @@ async fn compare_keyed<E: QueryExecutor>(
             .iter()
             .map(|pair| {
                 format!(
-                    "NOT EQUAL_NULL(C.{}, P.{})",
-                    quote_identifier(&pair.0.name),
-                    quote_identifier(&pair.1.name)
+                    "NOT {}",
+                    dialect.null_safe_equal(
+                        &format!("C.{}", dialect.quote_identifier(&pair.0.name)),
+                        &format!("P.{}", dialect.quote_identifier(&pair.1.name)),
+                    )
                 )
             })
             .collect::<Vec<_>>()
             .join(" OR ")
     };
-    let candidate_present = format!("C.{} IS NOT NULL", quote_identifier(&keys[0].0.name));
-    let production_present = format!("P.{} IS NOT NULL", quote_identifier(&keys[0].1.name));
+    let candidate_present = format!(
+        "C.{} IS NOT NULL",
+        dialect.quote_identifier(&keys[0].0.name)
+    );
+    let production_present = format!(
+        "P.{} IS NOT NULL",
+        dialect.quote_identifier(&keys[0].1.name)
+    );
     let mut metrics = vec![
-        format!("COALESCE(COUNT_IF(NOT ({production_present})), 0)"),
-        format!("COALESCE(COUNT_IF(NOT ({candidate_present})), 0)"),
         format!(
-            "COALESCE(COUNT_IF(({candidate_present}) AND ({production_present}) AND ({changed})), 0)"
+            "COALESCE({}, 0)",
+            dialect.count_if(&format!("NOT ({production_present})"))
+        ),
+        format!(
+            "COALESCE({}, 0)",
+            dialect.count_if(&format!("NOT ({candidate_present})"))
+        ),
+        format!(
+            "COALESCE({}, 0)",
+            dialect.count_if(&format!(
+                "({candidate_present}) AND ({production_present}) AND ({changed})"
+            ))
         ),
     ];
     metrics.extend(value_pairs.iter().map(|pair| {
+        let different = format!(
+            "NOT {}",
+            dialect.null_safe_equal(
+                &format!("C.{}", dialect.quote_identifier(&pair.0.name)),
+                &format!("P.{}", dialect.quote_identifier(&pair.1.name)),
+            )
+        );
         format!(
-            "COALESCE(COUNT_IF(({candidate_present}) AND ({production_present}) AND NOT EQUAL_NULL(C.{}, P.{})), 0)",
-            quote_identifier(&pair.0.name), quote_identifier(&pair.1.name)
+            "COALESCE({}, 0)",
+            dialect.count_if(&format!(
+                "({candidate_present}) AND ({production_present}) AND {different}"
+            ))
         )
     }));
     let counts = executor
         .execute(&format!(
             "SELECT {} FROM {} C FULL OUTER JOIN {} P ON {join}",
             metrics.join(", "),
-            candidate.sql(),
-            production.sql()
+            candidate.sql(dialect),
+            production.sql(dialect)
         ))
         .await?;
     let row = counts
@@ -1063,7 +1081,7 @@ async fn compare_keyed<E: QueryExecutor>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn keyed_examples<E: QueryExecutor>(
+async fn keyed_examples<E: QueryExecutor + ?Sized>(
     executor: &E,
     candidate: &Relation,
     production: &Relation,
@@ -1077,17 +1095,18 @@ async fn keyed_examples<E: QueryExecutor>(
     value_limit: usize,
     examples_truncated: &mut bool,
 ) -> Result<Vec<QueryDiffExample>> {
+    let dialect = executor.dialect();
     let key_values = keys
         .iter()
-        .map(|pair| bounded_coalesce("C", &pair.0.name, "P", &pair.1.name, value_limit))
+        .map(|pair| bounded_coalesce(dialect, "C", &pair.0.name, "P", &pair.1.name, value_limit))
         .collect::<Vec<_>>();
     let candidate_values = pairs
         .iter()
-        .map(|pair| bounded_value("C", &pair.0.name, value_limit))
+        .map(|pair| bounded_value(dialect, "C", &pair.0.name, value_limit))
         .collect::<Vec<_>>();
     let production_values = pairs
         .iter()
-        .map(|pair| bounded_value("P", &pair.1.name, value_limit))
+        .map(|pair| bounded_value(dialect, "P", &pair.1.name, value_limit))
         .collect::<Vec<_>>();
     let selected = key_values
         .iter()
@@ -1100,14 +1119,14 @@ async fn keyed_examples<E: QueryExecutor>(
         .map(|pair| {
             format!(
                 "COALESCE(C.{}, P.{}) NULLS FIRST",
-                quote_identifier(&pair.0.name),
-                quote_identifier(&pair.1.name)
+                dialect.quote_identifier(&pair.0.name),
+                dialect.quote_identifier(&pair.1.name)
             )
         })
         .chain(pairs.iter().flat_map(|pair| {
             [
-                format!("C.{} NULLS FIRST", quote_identifier(&pair.0.name)),
-                format!("P.{} NULLS FIRST", quote_identifier(&pair.1.name)),
+                format!("C.{} NULLS FIRST", dialect.quote_identifier(&pair.0.name)),
+                format!("P.{} NULLS FIRST", dialect.quote_identifier(&pair.1.name)),
             ]
         }))
         .collect::<Vec<_>>()
@@ -1118,8 +1137,8 @@ async fn keyed_examples<E: QueryExecutor>(
              WHERE NOT ({candidate_present}) OR NOT ({production_present}) OR ({changed}) \
              ORDER BY {ordering} LIMIT {sample_limit}",
             selected.join(", "),
-            candidate.sql(),
-            production.sql()
+            candidate.sql(dialect),
+            production.sql(dialect)
         ))
         .await?;
     Ok(result
@@ -1142,7 +1161,7 @@ async fn keyed_examples<E: QueryExecutor>(
         .collect())
 }
 
-async fn compare_unkeyed<E: QueryExecutor>(
+async fn compare_unkeyed<E: QueryExecutor + ?Sized>(
     executor: &E,
     candidate: &Relation,
     production: &Relation,
@@ -1150,13 +1169,14 @@ async fn compare_unkeyed<E: QueryExecutor>(
     limits: ExampleLimits,
     examples_truncated: &mut bool,
 ) -> Result<QueryComparison> {
+    let dialect = executor.dialect();
     let candidate_columns = pairs
         .iter()
         .map(|pair| {
             format!(
                 "{} AS {}",
-                quote_identifier(&pair.0.name),
-                quote_identifier(&pair.0.name)
+                dialect.quote_identifier(&pair.0.name),
+                dialect.quote_identifier(&pair.0.name)
             )
         })
         .collect::<Vec<_>>();
@@ -1165,28 +1185,28 @@ async fn compare_unkeyed<E: QueryExecutor>(
         .map(|pair| {
             format!(
                 "{} AS {}",
-                quote_identifier(&pair.1.name),
-                quote_identifier(&pair.0.name)
+                dialect.quote_identifier(&pair.1.name),
+                dialect.quote_identifier(&pair.0.name)
             )
         })
         .collect::<Vec<_>>();
     let canonical = pairs
         .iter()
-        .map(|pair| quote_identifier(&pair.0.name))
+        .map(|pair| dialect.quote_identifier(&pair.0.name))
         .collect::<Vec<_>>();
     let join = canonical
         .iter()
-        .map(|name| format!("EQUAL_NULL(C.{name}, P.{name})"))
+        .map(|name| dialect.null_safe_equal(&format!("C.{name}"), &format!("P.{name}")))
         .collect::<Vec<_>>()
         .join(" AND ");
     let cte = format!(
         "C AS (SELECT {}, COUNT(*) AS __EMBRASURE_N FROM {} GROUP BY {}), \
          P AS (SELECT {}, COUNT(*) AS __EMBRASURE_N FROM {} GROUP BY {})",
         candidate_columns.join(", "),
-        candidate.sql(),
+        candidate.sql(dialect),
         canonical.join(", "),
         production_columns.join(", "),
-        production.sql(),
+        production.sql(dialect),
         canonical.join(", ")
     );
     let counts = executor
@@ -1208,17 +1228,22 @@ async fn compare_unkeyed<E: QueryExecutor>(
     } else {
         let candidate_values = pairs
             .iter()
-            .map(|pair| bounded_value("C", &pair.0.name, limits.value_chars))
+            .map(|pair| bounded_value(dialect, "C", &pair.0.name, limits.value_chars))
             .collect::<Vec<_>>();
         let production_values = pairs
             .iter()
-            .map(|pair| bounded_value("P", &pair.0.name, limits.value_chars))
+            .map(|pair| bounded_value(dialect, "P", &pair.0.name, limits.value_chars))
             .collect::<Vec<_>>();
         let row_values = pairs
             .iter()
-            .map(|pair| format!("COALESCE(C.{0}, P.{0})", quote_identifier(&pair.0.name)))
+            .map(|pair| {
+                format!(
+                    "COALESCE(C.{0}, P.{0})",
+                    dialect.quote_identifier(&pair.0.name)
+                )
+            })
             .collect::<Vec<_>>();
-        let ordering = std::iter::once(format!("HASH({})", row_values.join(", ")))
+        let ordering = std::iter::once(dialect.stable_hash(&row_values))
             .chain(
                 row_values
                     .iter()
@@ -1235,8 +1260,8 @@ async fn compare_unkeyed<E: QueryExecutor>(
             .chain(&production_values)
             .cloned()
             .chain([
-                "COALESCE(C.__EMBRASURE_N, 0)::VARCHAR".into(),
-                "COALESCE(P.__EMBRASURE_N, 0)::VARCHAR".into(),
+                dialect.cast_text("COALESCE(C.__EMBRASURE_N, 0)"),
+                dialect.cast_text("COALESCE(P.__EMBRASURE_N, 0)"),
             ])
             .collect::<Vec<_>>();
         let result = executor
@@ -1286,15 +1311,19 @@ async fn compare_unkeyed<E: QueryExecutor>(
     })
 }
 
-fn bounded_value(alias: &str, column: &str, limit: usize) -> String {
-    let value = format!("TO_VARCHAR({alias}.{})", quote_identifier(column));
-    format!(
-        "IFF({alias}.{column} IS NULL, NULL, IFF(LENGTH({value}) > {limit}, CONCAT(LEFT({value}, {limit}), '<truncated>'), {value}))",
-        column = quote_identifier(column)
-    )
+fn bounded_value(dialect: SqlDialect, alias: &str, column: &str, limit: usize) -> String {
+    let qualified = format!("{alias}.{}", dialect.quote_identifier(column));
+    let value = dialect.to_text(&qualified);
+    let bounded = dialect.conditional(
+        &format!("LENGTH({value}) > {limit}"),
+        &format!("CONCAT(LEFT({value}, {limit}), '<truncated>')"),
+        &value,
+    );
+    dialect.conditional(&format!("{qualified} IS NULL"), "NULL", &bounded)
 }
 
 fn bounded_coalesce(
+    dialect: SqlDialect,
     candidate_alias: &str,
     candidate_column: &str,
     production_alias: &str,
@@ -1304,14 +1333,17 @@ fn bounded_coalesce(
     let value = format!(
         "COALESCE({}.{}, {}.{})",
         candidate_alias,
-        quote_identifier(candidate_column),
+        dialect.quote_identifier(candidate_column),
         production_alias,
-        quote_identifier(production_column)
+        dialect.quote_identifier(production_column)
     );
-    let text = format!("TO_VARCHAR({value})");
-    format!(
-        "IFF({value} IS NULL, NULL, IFF(LENGTH({text}) > {limit}, CONCAT(LEFT({text}, {limit}), '<truncated>'), {text}))"
-    )
+    let text = dialect.to_text(&value);
+    let bounded = dialect.conditional(
+        &format!("LENGTH({text}) > {limit}"),
+        &format!("CONCAT(LEFT({text}, {limit}), '<truncated>')"),
+        &text,
+    );
+    dialect.conditional(&format!("{value} IS NULL"), "NULL", &bounded)
 }
 
 fn truncate_row(row: &mut [Option<String>], limit: usize, truncated: &mut bool) {
@@ -1333,9 +1365,9 @@ fn truncate_row(row: &mut [Option<String>], limit: usize, truncated: &mut bool) 
 fn parse_u64(value: Option<&Option<String>>) -> Result<u64> {
     value
         .and_then(Option::as_deref)
-        .context("Snowflake metric was null")?
+        .context("warehouse metric was null")?
         .parse()
-        .context("Snowflake metric was not an unsigned integer")
+        .context("warehouse metric was not an unsigned integer")
 }
 
 #[cfg(test)]
@@ -1358,10 +1390,11 @@ mod tests {
     }
 
     impl QueryExecutor for FakeExecutor {
-        fn execute<'a>(
-            &'a self,
-            statement: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<QueryResult>> + Send + 'a>> {
+        fn dialect(&self) -> SqlDialect {
+            SqlDialect::Snowflake
+        }
+
+        fn execute<'a>(&'a self, statement: &'a str) -> ProviderFuture<'a, QueryResult> {
             Box::pin(async move {
                 self.statements.lock().unwrap().push(statement.into());
                 self.responses
@@ -1450,12 +1483,12 @@ mod tests {
             },
         ];
         assert!(
-            validate_preflight(&duplicate, &[], 10)
+            validate_preflight(SqlDialect::Snowflake, &duplicate, &[], 10)
                 .unwrap()
                 .contains("duplicate")
         );
         assert!(
-            validate_preflight(&duplicate[..1], &[], 0)
+            validate_preflight(SqlDialect::Snowflake, &duplicate[..1], &[], 0)
                 .unwrap()
                 .contains("above")
         );
@@ -1471,8 +1504,13 @@ mod tests {
             },
         ];
         assert_eq!(
-            primary_key_metadata_error(&["order;id".into()], &punctuation, &punctuation[..1])
-                .as_deref(),
+            primary_key_metadata_error(
+                SqlDialect::Snowflake,
+                &["order;id".into()],
+                &punctuation,
+                &punctuation[..1],
+            )
+            .as_deref(),
             Some("primary-key column order;id is ambiguous")
         );
 
@@ -1495,12 +1533,13 @@ mod tests {
             },
         ];
         assert!(
-            validate_preflight(&unrelated_then_key, &[], 10)
+            validate_preflight(SqlDialect::Snowflake, &unrelated_then_key, &[], 10)
                 .unwrap()
                 .contains("AMOUNT")
         );
         assert_eq!(
             primary_key_metadata_error(
+                SqlDialect::Snowflake,
                 &["order;id".into()],
                 &unrelated_then_key,
                 &punctuation[..1]
@@ -1516,17 +1555,23 @@ mod tests {
             }]
         };
         assert!(
-            primary_key_metadata_error(&["id".into()], &typed_key("NUMBER"), &typed_key("VARCHAR"))
-                .unwrap()
-                .contains("incompatible types")
+            primary_key_metadata_error(
+                SqlDialect::Snowflake,
+                &["id".into()],
+                &typed_key("NUMBER"),
+                &typed_key("VARCHAR"),
+            )
+            .unwrap()
+            .contains("incompatible types")
         );
     }
 
     #[test]
     fn unsupported_values_require_explicit_casts() {
-        assert!(unsupported_type("VARIANT"));
-        assert!(unsupported_type("GEOGRAPHY"));
-        assert!(!unsupported_type("VARCHAR(100)"));
+        let dialect = SqlDialect::Snowflake;
+        assert!(dialect.is_unsupported_value("VARIANT"));
+        assert!(dialect.is_unsupported_value("GEOGRAPHY"));
+        assert!(!dialect.is_unsupported_value("VARCHAR(100)"));
     }
 
     #[test]

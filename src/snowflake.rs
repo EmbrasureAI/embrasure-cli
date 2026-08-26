@@ -22,8 +22,12 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use crate::{
-    auth::{ResolvedAuth, account_host},
-    config::AccountConfig,
+    auth::{ResolvedAuth, SnowflakeResolvedAuth, account_host},
+    config::{AccountConfig, SnowflakeConfig},
+    provider::{
+        ProviderFuture, QueryExecutor, QueryResult, Relation, ResultColumn, SqlDialect,
+        WarehouseProvider, is_managed_schema,
+    },
 };
 
 #[derive(Clone)]
@@ -32,28 +36,9 @@ pub struct SnowflakeClient {
     endpoint: String,
     token: String,
     token_type: &'static str,
-    account: AccountConfig,
+    account: SnowflakeConfig,
     query_tag: String,
     timeout_seconds: u64,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct QueryResult {
-    pub columns: Vec<ResultColumn>,
-    pub rows: Vec<Vec<Option<String>>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResultColumn {
-    pub name: String,
-    pub data_type: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Relation {
-    pub database: String,
-    pub schema: String,
-    pub identifier: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,17 +49,6 @@ struct Claims {
     exp: u64,
 }
 
-impl Relation {
-    pub fn sql(&self) -> String {
-        format!(
-            "{}.{}.{}",
-            quote_identifier(&self.database),
-            quote_identifier(&self.schema),
-            quote_identifier(&self.identifier)
-        )
-    }
-}
-
 impl SnowflakeClient {
     pub fn new(
         account: &AccountConfig,
@@ -82,16 +56,22 @@ impl SnowflakeClient {
         query_tag: String,
         timeout_seconds: u64,
     ) -> Result<Self> {
+        let account = account
+            .snowflake()
+            .context("Snowflake client requires Snowflake account configuration")?;
+        let ResolvedAuth::Snowflake(auth) = auth else {
+            bail!("Snowflake client received credentials for another provider");
+        };
         let (token, token_type) = match auth {
-            ResolvedAuth::OAuth { token } => (token.clone(), "OAUTH"),
-            ResolvedAuth::KeyPair {
+            SnowflakeResolvedAuth::OAuth { token } => (token.clone(), "OAUTH"),
+            SnowflakeResolvedAuth::KeyPair {
                 private_key_path,
                 passphrase,
             } => (
                 key_pair_jwt(account, private_key_path, passphrase.as_deref())?,
                 "KEYPAIR_JWT",
             ),
-            ResolvedAuth::ProgrammaticAccessToken { token } => {
+            SnowflakeResolvedAuth::ProgrammaticAccessToken { token } => {
                 (token.clone(), "PROGRAMMATIC_ACCESS_TOKEN")
             }
         };
@@ -241,13 +221,17 @@ impl SnowflakeClient {
         Ok(())
     }
 
-    pub async fn clone_table(&self, source: &Relation, target: &Relation) -> Result<()> {
+    pub async fn copy_table(&self, source: &Relation, target: &Relation) -> Result<()> {
         self.execute(&clone_table_statement(source, target)).await?;
         Ok(())
     }
 
+    pub async fn seed_table(&self, source: &Relation, target: &Relation) -> Result<()> {
+        self.copy_table(source, target).await
+    }
+
     pub async fn drop_schema(&self, database: &str, schema: &str, run_schema: &str) -> Result<()> {
-        if !is_managed_schema(schema, run_schema) {
+        if !is_managed_schema(SqlDialect::Snowflake, schema, run_schema) {
             bail!("refusing to drop schema {schema}: it is not owned by this run ({run_schema})");
         }
         let Some(comment) = self.schema_comment(database, schema).await? else {
@@ -342,8 +326,56 @@ impl SnowflakeClient {
     }
 }
 
+impl QueryExecutor for SnowflakeClient {
+    fn dialect(&self) -> SqlDialect {
+        SqlDialect::Snowflake
+    }
+
+    fn execute<'a>(&'a self, statement: &'a str) -> ProviderFuture<'a, QueryResult> {
+        Box::pin(SnowflakeClient::execute(self, statement))
+    }
+}
+
+impl WarehouseProvider for SnowflakeClient {
+    fn create_schema<'a>(&'a self, database: &'a str, schema: &'a str) -> ProviderFuture<'a, ()> {
+        Box::pin(SnowflakeClient::create_schema(self, database, schema))
+    }
+
+    fn copy_table<'a>(
+        &'a self,
+        source: &'a Relation,
+        target: &'a Relation,
+    ) -> ProviderFuture<'a, ()> {
+        Box::pin(SnowflakeClient::copy_table(self, source, target))
+    }
+
+    fn seed_table<'a>(
+        &'a self,
+        source: &'a Relation,
+        target: &'a Relation,
+    ) -> ProviderFuture<'a, ()> {
+        Box::pin(SnowflakeClient::seed_table(self, source, target))
+    }
+
+    fn drop_schema<'a>(
+        &'a self,
+        database: &'a str,
+        schema: &'a str,
+        run_schema: &'a str,
+    ) -> ProviderFuture<'a, ()> {
+        Box::pin(SnowflakeClient::drop_schema(
+            self, database, schema, run_schema,
+        ))
+    }
+}
+
 fn clone_table_statement(source: &Relation, target: &Relation) -> String {
-    format!("CREATE TABLE {} CLONE {}", target.sql(), source.sql())
+    let dialect = SqlDialect::Snowflake;
+    format!(
+        "CREATE TABLE {} CLONE {}",
+        target.sql(dialect),
+        source.sql(dialect)
+    )
 }
 
 fn drop_schema_statement(database: &str, schema: &str) -> String {
@@ -356,7 +388,7 @@ fn drop_schema_statement(database: &str, schema: &str) -> String {
 
 fn statement_body(
     statement: &str,
-    account: &AccountConfig,
+    account: &SnowflakeConfig,
     query_tag: &str,
     timeout_seconds: u64,
 ) -> Value {
@@ -371,7 +403,7 @@ fn statement_body(
 }
 
 fn key_pair_jwt(
-    account: &AccountConfig,
+    account: &SnowflakeConfig,
     path: &std::path::Path,
     passphrase: Option<&str>,
 ) -> Result<String> {
@@ -484,24 +516,18 @@ fn parse_rows(rows: Vec<Vec<Value>>) -> Vec<Vec<Option<String>>> {
 }
 
 pub fn quote_identifier(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
+    SqlDialect::Snowflake.quote_identifier(value)
 }
 
 fn quote_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-pub fn is_managed_schema(schema: &str, run_schema: &str) -> bool {
-    let schema = schema.to_ascii_uppercase();
-    let run_schema = run_schema.to_ascii_uppercase();
-    schema == run_schema || schema.starts_with(&format!("{run_schema}_"))
-}
-
 fn privilege_hint(
     code: &str,
     message: &str,
     statement: &str,
-    account: &AccountConfig,
+    account: &SnowflakeConfig,
 ) -> Option<String> {
     let upper = statement.trim_start().to_ascii_uppercase();
     let insufficient = code == "003001"
@@ -554,7 +580,7 @@ mod tests {
                 schema: "S".into(),
                 identifier: "T".into()
             }
-            .sql(),
+            .sql(SqlDialect::Snowflake),
             "\"D\".\"S\".\"T\""
         );
     }
@@ -570,26 +596,37 @@ mod tests {
     #[test]
     fn cleanup_is_limited_to_the_exact_run_namespace() {
         let run = "EMBRASURE_CHECK_SHA_TIME_RANDOM";
-        assert!(is_managed_schema(run, run));
-        assert!(is_managed_schema(
+        assert!(crate::provider::is_managed_schema(
+            SqlDialect::Snowflake,
+            run,
+            run
+        ));
+        assert!(crate::provider::is_managed_schema(
+            SqlDialect::Snowflake,
             "EMBRASURE_CHECK_SHA_TIME_RANDOM_MARKETING",
             run
         ));
-        assert!(!is_managed_schema("EMBRASURE_CHECK_PROD", run));
-        assert!(!is_managed_schema("EMBRASURE_CHECK_SHA_TIME_RANDOMLY", run));
+        assert!(!crate::provider::is_managed_schema(
+            SqlDialect::Snowflake,
+            "EMBRASURE_CHECK_PROD",
+            run
+        ));
+        assert!(!crate::provider::is_managed_schema(
+            SqlDialect::Snowflake,
+            "EMBRASURE_CHECK_SHA_TIME_RANDOMLY",
+            run
+        ));
     }
 
     #[test]
     fn privilege_errors_include_actionable_hints() {
-        let account = AccountConfig {
-            name: "primary".into(),
+        let account = SnowflakeConfig {
             account: "org-account".into(),
             user: "DBT_CI".into(),
             role: "DBT_CI_ROLE".into(),
             database: "ANALYTICS".into(),
             warehouse: "DBT_CI_WH".into(),
             production_schema: "PROD".into(),
-            selector: None,
             auth: AuthConfig::OauthLocal,
         };
         assert!(
@@ -689,15 +726,13 @@ mod tests {
 
     #[test]
     fn sql_api_body_uses_supported_request_fields() {
-        let account = AccountConfig {
-            name: "one".into(),
+        let account = SnowflakeConfig {
             account: "org-account".into(),
             user: "CI".into(),
             role: "ROLE".into(),
             database: "DB".into(),
             warehouse: "WH".into(),
             production_schema: "PROD".into(),
-            selector: None,
             auth: AuthConfig::Oauth {
                 token_env: "TOKEN".into(),
             },
@@ -722,20 +757,23 @@ mod tests {
         };
         let account = AccountConfig {
             name: "integration".into(),
-            account: required("EMBRASURE_TEST_SNOWFLAKE_ACCOUNT"),
-            user: required("EMBRASURE_TEST_SNOWFLAKE_USER"),
-            role: required("EMBRASURE_TEST_SNOWFLAKE_ROLE"),
-            database: required("EMBRASURE_TEST_SNOWFLAKE_DATABASE"),
-            warehouse: required("EMBRASURE_TEST_SNOWFLAKE_WAREHOUSE"),
-            production_schema: "unused".into(),
             selector: None,
-            auth: AuthConfig::ProgrammaticAccessToken {
-                token_env: "EMBRASURE_TEST_SNOWFLAKE_TOKEN".into(),
-            },
+            provider: crate::config::ProviderConfig::Snowflake(SnowflakeConfig {
+                account: required("EMBRASURE_TEST_SNOWFLAKE_ACCOUNT"),
+                user: required("EMBRASURE_TEST_SNOWFLAKE_USER"),
+                role: required("EMBRASURE_TEST_SNOWFLAKE_ROLE"),
+                database: required("EMBRASURE_TEST_SNOWFLAKE_DATABASE"),
+                warehouse: required("EMBRASURE_TEST_SNOWFLAKE_WAREHOUSE"),
+                production_schema: "unused".into(),
+                auth: AuthConfig::ProgrammaticAccessToken {
+                    token_env: "EMBRASURE_TEST_SNOWFLAKE_TOKEN".into(),
+                },
+            }),
+            legacy: false,
         };
-        let auth = ResolvedAuth::ProgrammaticAccessToken {
+        let auth = ResolvedAuth::Snowflake(SnowflakeResolvedAuth::ProgrammaticAccessToken {
             token: required("EMBRASURE_TEST_SNOWFLAKE_TOKEN"),
-        };
+        });
         let run_schema = format!("EMBRASURE_IT_{}", Uuid::new_v4().simple()).to_ascii_uppercase();
         let second_schema = format!("{run_schema}_SECOND");
         let client = SnowflakeClient::new(
@@ -746,26 +784,26 @@ mod tests {
         )
         .unwrap();
         client
-            .create_schema(&account.database, &run_schema)
+            .create_schema(account.database(), &run_schema)
             .await
             .unwrap();
         client
-            .create_schema(&account.database, &second_schema)
+            .create_schema(account.database(), &second_schema)
             .await
             .unwrap();
 
         let source = Relation {
-            database: account.database.clone(),
+            database: account.database().to_owned(),
             schema: run_schema.clone(),
             identifier: "SOURCE".into(),
         };
         let baseline = Relation {
-            database: account.database.clone(),
+            database: account.database().to_owned(),
             schema: second_schema.clone(),
             identifier: "BASELINE".into(),
         };
         let candidate = Relation {
-            database: account.database.clone(),
+            database: account.database().to_owned(),
             schema: second_schema.clone(),
             identifier: "CANDIDATE".into(),
         };
@@ -773,32 +811,36 @@ mod tests {
             client
                 .execute(&format!(
                     "CREATE TABLE {} AS SELECT ID, MOD(ID, 100) AS SEGMENT FROM (SELECT ROW_NUMBER() OVER (ORDER BY SEQ4()) - 1 AS ID FROM TABLE(GENERATOR(ROWCOUNT => 100000)))",
-                    source.sql()
+                    source.sql(SqlDialect::Snowflake)
                 ))
                 .await?;
-            client.clone_table(&source, &baseline).await?;
-            client.clone_table(&baseline, &candidate).await?;
+            client.copy_table(&source, &baseline).await?;
+            client.seed_table(&baseline, &candidate).await?;
             client
                 .execute(&format!(
                     "MERGE INTO {} C USING (SELECT 100000 AS ID, 0 AS SEGMENT) N ON C.ID = N.ID WHEN NOT MATCHED THEN INSERT (ID, SEGMENT) VALUES (N.ID, N.SEGMENT)",
-                    candidate.sql()
+                    candidate.sql(SqlDialect::Snowflake)
                 ))
                 .await?;
             let incremental = client
-                .execute(&format!("SELECT COUNT(*) FROM {}", candidate.sql()))
+                .execute(&format!(
+                    "SELECT COUNT(*) FROM {}",
+                    candidate.sql(SqlDialect::Snowflake)
+                ))
                 .await?;
             assert_eq!(incremental.rows[0][0].as_deref(), Some("100001"));
 
             client
                 .execute(&format!(
                     "CREATE OR REPLACE TABLE {} AS SELECT * FROM {} WHERE ID < 50000 UNION ALL SELECT 1, 1",
-                    candidate.sql(), baseline.sql()
+                    candidate.sql(SqlDialect::Snowflake),
+                    baseline.sql(SqlDialect::Snowflake)
                 ))
                 .await?;
             let integrity = client
                 .execute(&format!(
                     "SELECT COUNT(*) AS ROWS, COUNT_IF(ID IS NULL) AS NULL_KEYS, COUNT(*) - COUNT(DISTINCT ID) AS DUPLICATE_ROWS FROM {}",
-                    candidate.sql()
+                    candidate.sql(SqlDialect::Snowflake)
                 ))
                 .await?;
             assert_eq!(integrity.rows[0][0].as_deref(), Some("50001"));
@@ -806,19 +848,22 @@ mod tests {
             assert_eq!(integrity.rows[0][2].as_deref(), Some("1"));
 
             let query_candidate = Relation {
-                database: account.database.clone(),
+                database: account.database().to_owned(),
                 schema: second_schema.clone(),
                 identifier: "QUERY_CANDIDATE".into(),
             };
             let query_production = Relation {
-                database: account.database.clone(),
+                database: account.database().to_owned(),
                 schema: second_schema.clone(),
                 identifier: "QUERY_PRODUCTION".into(),
             };
-            let candidate_sql = format!("SELECT ID, SEGMENT FROM {}", candidate.sql());
+            let candidate_sql = format!(
+                "SELECT ID, SEGMENT FROM {}",
+                candidate.sql(SqlDialect::Snowflake)
+            );
             let production_sql = format!(
                 "SELECT ID, SEGMENT FROM {} WHERE ID < 50000",
-                baseline.sql()
+                baseline.sql(SqlDialect::Snowflake)
             );
             let query_report = run_query_diff(
                 &client,
@@ -844,16 +889,19 @@ mod tests {
             assert_eq!(comparison.examples[0].production_multiplicity, Some(1));
 
             let pass_candidate = Relation {
-                database: account.database.clone(),
+                database: account.database().to_owned(),
                 schema: second_schema.clone(),
                 identifier: "QUERY_PASS_CANDIDATE".into(),
             };
             let pass_production = Relation {
-                database: account.database.clone(),
+                database: account.database().to_owned(),
                 schema: second_schema.clone(),
                 identifier: "QUERY_PASS_PRODUCTION".into(),
             };
-            let pass_sql = format!("SELECT ID, SEGMENT FROM {}", baseline.sql());
+            let pass_sql = format!(
+                "SELECT ID, SEGMENT FROM {}",
+                baseline.sql(SqlDialect::Snowflake)
+            );
             let pass = run_query_diff(
                 &client,
                 QueryDiffInput {
@@ -873,12 +921,12 @@ mod tests {
             assert_eq!(pass.status, QueryCheckStatus::Pass);
 
             let keyed_candidate = Relation {
-                database: account.database.clone(),
+                database: account.database().to_owned(),
                 schema: second_schema.clone(),
                 identifier: "QUERY_KEYED_CANDIDATE".into(),
             };
             let keyed_production = Relation {
-                database: account.database.clone(),
+                database: account.database().to_owned(),
                 schema: second_schema.clone(),
                 identifier: "QUERY_KEYED_PRODUCTION".into(),
             };
@@ -912,10 +960,10 @@ mod tests {
         .await;
 
         let second_cleanup = client
-            .drop_schema(&account.database, &second_schema, &run_schema)
+            .drop_schema(account.database(), &second_schema, &run_schema)
             .await;
         let first_cleanup = client
-            .drop_schema(&account.database, &run_schema, &run_schema)
+            .drop_schema(account.database(), &run_schema, &run_schema)
             .await;
         result.unwrap();
         second_cleanup.unwrap();

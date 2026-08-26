@@ -179,7 +179,7 @@ accounts:
     assert_eq!(report["exit_code"], 3);
     assert!(report["ci_schemas"].as_array().unwrap().is_empty());
     let error = report["execution_errors"][0].as_str().unwrap();
-    assert!(error.contains("Install dbt Core and dbt-snowflake"));
+    assert!(error.contains("Install dbt Core and the adapter"));
     assert!(error.contains("missing-dbt-for-embrasure-test --version"));
     assert!(!error.contains("No such file or directory"));
     #[cfg(windows)]
