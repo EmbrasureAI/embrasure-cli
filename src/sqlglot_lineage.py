@@ -42,17 +42,25 @@ def terminal_nodes(node):
         yield from terminal_nodes(child)
 
 
-def relation_sql(table):
+def normalize_unquoted(value, quoted, unquoted_case):
+    if quoted or unquoted_case == "preserve":
+        return value
+    if unquoted_case == "lower":
+        return value.lower()
+    return value.upper()
+
+
+def relation_sql(table, dialect):
     relation = table.copy()
     relation.set("alias", None)
-    return relation.sql(dialect="snowflake")
+    return relation.sql(dialect=dialect)
 
 
-def trace_model(model):
+def trace_model(model, dialect, unquoted_case):
     edges = []
     gaps = []
     try:
-        expression = sqlglot.parse_one(model["sql"], dialect="snowflake")
+        expression = sqlglot.parse_one(model["sql"], dialect=dialect)
     except Exception as error:
         return {
             "unique_id": model["unique_id"],
@@ -76,15 +84,16 @@ def trace_model(model):
             output_node = lineage(
                 exp.column(output_column, quoted=output_is_quoted),
                 expression,
-                dialect="snowflake",
+                dialect=dialect,
             )
         except Exception as error:
             gaps.append(
                 f"{output_column} could not be resolved by SQLGlot: {error_text(error)}"
             )
             continue
-        if not output_is_quoted:
-            output_column = output_column.upper()
+        output_column = normalize_unquoted(
+            output_column, output_is_quoted, unquoted_case
+        )
 
         for leaf in terminal_nodes(output_node):
             table = leaf.expression
@@ -93,11 +102,16 @@ def trace_model(model):
             if not isinstance(table, exp.Table):
                 gaps.append(
                     f"{output_column} ends at an unsupported SQL source: "
-                    f"{table.sql(dialect='snowflake')}"
+                    f"{table.sql(dialect=dialect)}"
                 )
                 continue
 
-            source_column = exp.to_column(leaf.name).name
+            source = exp.to_column(leaf.name)
+            source_column = normalize_unquoted(
+                source.name,
+                bool(source.this.args.get("quoted")),
+                unquoted_case,
+            )
             if source_column == "*":
                 gaps.append(
                     f"{output_column} depends on a wildcard that cannot be expanded "
@@ -115,7 +129,7 @@ def trace_model(model):
                     "source_database": identifier(table.args.get("catalog")),
                     "source_schema": identifier(table.args.get("db")),
                     "source_table": identifier(table.this),
-                    "source_relation": relation_sql(table),
+                    "source_relation": relation_sql(table, dialect),
                 }
             )
 
@@ -140,9 +154,14 @@ def main():
             f"SQLGlot 30.x is required; found {sqlglot.__version__}"
         )
     request = json.load(sys.stdin)
+    dialect = request.get("dialect", "snowflake")
+    unquoted_case = request.get("unquoted_case", "upper")
     response = {
         "sqlglot_version": sqlglot.__version__,
-        "models": [trace_model(model) for model in request["models"]],
+        "models": [
+            trace_model(model, dialect, unquoted_case)
+            for model in request["models"]
+        ],
     }
     json.dump(response, sys.stdout, separators=(",", ":"))
 

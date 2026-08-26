@@ -14,9 +14,9 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use crate::{
-    auth::ResolvedAuth,
-    config::{AccountConfig, Config},
-    git,
+    auth::{DatabricksResolvedAuth, ResolvedAuth, SnowflakeResolvedAuth},
+    config::{AccountConfig, Config, ProviderConfig},
+    git, provider,
     report::{ImpactReport, ImpactedAsset, LineageChange, LineageChangeKind, LineageEdge},
 };
 
@@ -29,7 +29,7 @@ fn verify_executable_for_shell(command: &str, shell: &str) -> Result<String> {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             bail!(
-                "dbt executable `{command}` was not found (detected shell: {shell}). Install dbt Core and dbt-snowflake with your project's package manager and activate that environment, or {}. Verify with `{command} --version`.",
+                "dbt executable `{command}` was not found (detected shell: {shell}). Install dbt Core and the adapter for your configured warehouse with your project's package manager and activate that environment, or {}. Verify with `{command} --version`.",
                 path_instruction(shell),
             );
         }
@@ -201,7 +201,14 @@ struct Profile {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ProfileOutput {
+#[serde(untagged)]
+enum ProfileOutput {
+    Snowflake(SnowflakeProfileOutput),
+    Databricks(DatabricksProfileOutput),
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SnowflakeProfileOutput {
     #[serde(rename = "type")]
     kind: &'static str,
     account: String,
@@ -223,6 +230,18 @@ struct ProfileOutput {
     private_key_passphrase: Option<String>,
     query_tag: String,
     session_parameters: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DatabricksProfileOutput {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    host: String,
+    http_path: String,
+    catalog: String,
+    schema: String,
+    token: String,
+    threads: u16,
 }
 
 impl Manifest {
@@ -618,7 +637,7 @@ pub fn prepare(
             config,
             auth,
             &base_profiles,
-            |account| account.production_schema.clone(),
+            |account| account.production_schema().to_owned(),
             query_tag,
         )?;
         maybe_dbt_deps(config, &base_project, &base_profiles)?;
@@ -1058,54 +1077,73 @@ fn write_profiles(
 ) -> Result<()> {
     let mut outputs = BTreeMap::new();
     for account in &config.accounts {
-        let mut session_parameters = BTreeMap::new();
-        session_parameters.insert("QUERY_TAG".to_owned(), Value::String(query_tag.to_owned()));
-        session_parameters.insert(
-            "STATEMENT_TIMEOUT_IN_SECONDS".to_owned(),
-            Value::from(config.safety.statement_timeout_seconds),
-        );
         let resolved = auth
             .get(&account.name)
             .with_context(|| format!("resolved auth is missing for account {}", account.name))?;
-        let (authenticator, token, password, private_key_path, private_key_passphrase) =
-            match resolved {
-                ResolvedAuth::OAuth { token } => {
-                    (Some("oauth"), Some(token.clone()), None, None, None)
-                }
-                ResolvedAuth::KeyPair {
+        let output = match (&account.provider, resolved) {
+            (ProviderConfig::Snowflake(snowflake), ResolvedAuth::Snowflake(resolved)) => {
+                let mut session_parameters = BTreeMap::new();
+                session_parameters
+                    .insert("QUERY_TAG".to_owned(), Value::String(query_tag.to_owned()));
+                session_parameters.insert(
+                    "STATEMENT_TIMEOUT_IN_SECONDS".to_owned(),
+                    Value::from(config.safety.statement_timeout_seconds),
+                );
+                let (authenticator, token, password, private_key_path, private_key_passphrase) =
+                    match resolved {
+                        SnowflakeResolvedAuth::OAuth { token } => {
+                            (Some("oauth"), Some(token.clone()), None, None, None)
+                        }
+                        SnowflakeResolvedAuth::KeyPair {
+                            private_key_path,
+                            passphrase,
+                        } => (
+                            None,
+                            None,
+                            None,
+                            Some(private_key_path.to_string_lossy().into_owned()),
+                            passphrase.clone(),
+                        ),
+                        SnowflakeResolvedAuth::ProgrammaticAccessToken { token } => {
+                            (None, None, Some(token.clone()), None, None)
+                        }
+                    };
+                ProfileOutput::Snowflake(SnowflakeProfileOutput {
+                    kind: provider::dialect(account).dbt_adapter_name(),
+                    account: snowflake.account.clone(),
+                    user: snowflake.user.clone(),
+                    role: snowflake.role.clone(),
+                    database: snowflake.database.clone(),
+                    warehouse: snowflake.warehouse.clone(),
+                    schema: schema(account),
+                    threads: config.dbt.threads,
+                    authenticator,
+                    token,
+                    password,
                     private_key_path,
-                    passphrase,
-                } => (
-                    None,
-                    None,
-                    None,
-                    Some(private_key_path.to_string_lossy().into_owned()),
-                    passphrase.clone(),
-                ),
-                ResolvedAuth::ProgrammaticAccessToken { token } => {
-                    (None, None, Some(token.clone()), None, None)
-                }
-            };
-        outputs.insert(
-            account.name.clone(),
-            ProfileOutput {
-                kind: "snowflake",
-                account: account.account.clone(),
-                user: account.user.clone(),
-                role: account.role.clone(),
-                database: account.database.clone(),
-                warehouse: account.warehouse.clone(),
-                schema: schema(account),
-                threads: config.dbt.threads,
-                authenticator,
-                token,
-                password,
-                private_key_path,
-                private_key_passphrase,
-                query_tag: query_tag.to_owned(),
-                session_parameters,
-            },
-        );
+                    private_key_passphrase,
+                    query_tag: query_tag.to_owned(),
+                    session_parameters,
+                })
+            }
+            (ProviderConfig::Databricks(databricks), ResolvedAuth::Databricks(resolved)) => {
+                let DatabricksResolvedAuth::Token { token } = resolved;
+                ProfileOutput::Databricks(DatabricksProfileOutput {
+                    kind: provider::dialect(account).dbt_adapter_name(),
+                    host: databricks.dbt_host().to_owned(),
+                    http_path: databricks.http_path.clone(),
+                    catalog: databricks.catalog.clone(),
+                    schema: schema(account),
+                    token: token.clone(),
+                    threads: config.dbt.threads,
+                })
+            }
+            _ => bail!(
+                "resolved auth provider does not match account {}",
+                account.name
+            ),
+        };
+        outputs.insert(account.name.clone(), output);
     }
     let file = ProfileFile {
         profiles: BTreeMap::from([(
@@ -1466,7 +1504,7 @@ mod tests {
             .to_string();
         assert!(error.contains(&format!("dbt executable `{command}` was not found")));
         assert!(error.contains("detected shell: zsh"));
-        assert!(error.contains("Install dbt Core and dbt-snowflake"));
+        assert!(error.contains("Install dbt Core and the adapter"));
         assert!(error.contains("~/.zshrc"));
         assert!(error.contains(&format!("{command} --version")));
         assert!(!error.contains("No such file or directory"));
@@ -1547,14 +1585,47 @@ accounts:
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         let auth = BTreeMap::from([(
             "ci".into(),
-            ResolvedAuth::ProgrammaticAccessToken {
+            ResolvedAuth::Snowflake(SnowflakeResolvedAuth::ProgrammaticAccessToken {
                 token: "secret-pat".into(),
-            },
+            }),
         )]);
         let dir = tempfile::tempdir().unwrap();
         write_profiles(&config, &auth, dir.path(), |_| "CHECK".into(), "tag").unwrap();
         let profile = fs::read_to_string(dir.path().join("profiles.yml")).unwrap();
         assert!(profile.contains("password: secret-pat"));
         assert!(!profile.contains("authenticator:"));
+    }
+
+    #[test]
+    fn databricks_profile_uses_the_typed_provider_fields() {
+        let yaml = r#"
+version: 2
+accounts:
+  - name: lakehouse
+    provider:
+      type: databricks
+      host: https://example.cloud.databricks.com
+      http_path: /sql/1.0/warehouses/abc123
+      catalog: analytics
+      production_schema: prod
+      auth: { type: token }
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        let auth = BTreeMap::from([(
+            "lakehouse".into(),
+            ResolvedAuth::Databricks(DatabricksResolvedAuth::Token {
+                token: "secret-token".into(),
+            }),
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        write_profiles(&config, &auth, dir.path(), |_| "check".into(), "tag").unwrap();
+        let profile = fs::read_to_string(dir.path().join("profiles.yml")).unwrap();
+        assert!(profile.contains("type: databricks"));
+        assert!(profile.contains("host: example.cloud.databricks.com"));
+        assert!(profile.contains("http_path: /sql/1.0/warehouses/abc123"));
+        assert!(profile.contains("catalog: analytics"));
+        assert!(profile.contains("token: secret-token"));
+        assert!(!profile.contains("warehouse:"));
     }
 }

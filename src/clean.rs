@@ -6,7 +6,9 @@ use uuid::Uuid;
 
 use crate::{
     auth,
-    config::Config,
+    config::{Config, ProviderConfig},
+    databricks::DatabricksClient,
+    provider::{QueryResult, dialect},
     snowflake::{SnowflakeClient, quote_identifier},
 };
 
@@ -53,50 +55,66 @@ async fn run_inner(
     let resolved = auth::resolve_all(&config).await?;
     for account in &config.accounts {
         let result = async {
-            let client = SnowflakeClient::new(
-                account,
-                resolved
-                    .get(&account.name)
-                    .context("resolved Snowflake credential was not retained")?,
-                format!("embrasure:clean:{}", Uuid::new_v4()),
-                config.safety.statement_timeout_seconds,
-            )?;
-            let prefix = config.safety.schema_prefix.to_ascii_uppercase();
-            let query = format!(
-                "SELECT SCHEMA_NAME, COMMENT, TO_VARCHAR(CREATED) FROM {}.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME LIKE {} ESCAPE '!' AND COMMENT LIKE 'Temporary schema managed by Embrasure;%' AND CREATED < DATEADD('hour', -{}, CURRENT_TIMESTAMP()) ORDER BY CREATED, SCHEMA_NAME",
-                quote_identifier(&account.database),
-                quote_string(&format!("{prefix}!_%")),
-                older_than_hours,
-            );
-            let rows = client.execute(&query).await?;
-            for row in rows.rows {
-                let Some(schema) = row.first().and_then(Option::as_deref) else {
-                    continue;
-                };
-                let Some(comment) = row.get(1).and_then(Option::as_deref) else {
-                    continue;
-                };
-                let created = row
-                    .get(2)
-                    .and_then(Option::as_deref)
-                    .unwrap_or("unknown")
-                    .to_owned();
-                if !is_managed_prefix(schema, &prefix) || parse_ownership_marker(comment).is_none()
-                {
-                    continue;
+            let credential = resolved
+                .get(&account.name)
+                .context("resolved warehouse credential was not retained")?;
+            let query_tag = format!("embrasure:clean:{}", Uuid::new_v4());
+            let prefix = dialect(account)
+                .normalize_identifier(&config.safety.schema_prefix, None);
+            match &account.provider {
+                ProviderConfig::Snowflake(provider) => {
+                    let client = SnowflakeClient::new(
+                        account,
+                        credential,
+                        query_tag,
+                        config.safety.statement_timeout_seconds,
+                    )?;
+                    let query = format!(
+                        "SELECT SCHEMA_NAME, COMMENT, TO_VARCHAR(CREATED) FROM {}.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME LIKE {} ESCAPE '!' AND COMMENT LIKE 'Temporary schema managed by Embrasure;%' AND CREATED < DATEADD('hour', -{}, CURRENT_TIMESTAMP()) ORDER BY CREATED, SCHEMA_NAME",
+                        quote_identifier(&provider.database),
+                        quote_string(&format!("{prefix}!_%")),
+                        older_than_hours,
+                    );
+                    for candidate in managed_candidates(client.execute(&query).await?, &prefix) {
+                        if remove {
+                            client
+                                .drop_marked_schema(&provider.database, &candidate.schema, &prefix)
+                                .await?;
+                        }
+                        report.candidates.push(candidate.finish(
+                            &account.name,
+                            &provider.database,
+                            remove,
+                        ));
+                    }
                 }
-                if remove {
-                    client
-                        .drop_marked_schema(&account.database, schema, &prefix)
+                ProviderConfig::Databricks(provider) => {
+                    let client = DatabricksClient::new(
+                        account,
+                        credential,
+                        query_tag,
+                        config.safety.statement_timeout_seconds,
+                    )?;
+                    let rows = client
+                        .stale_managed_schemas(
+                            &provider.catalog,
+                            &prefix,
+                            older_than_hours,
+                        )
                         .await?;
+                    for candidate in managed_candidates(rows, &prefix) {
+                        if remove {
+                            client
+                                .drop_marked_schema(&provider.catalog, &candidate.schema, &prefix)
+                                .await?;
+                        }
+                        report.candidates.push(candidate.finish(
+                            &account.name,
+                            &provider.catalog,
+                            remove,
+                        ));
+                    }
                 }
-                report.candidates.push(CleanedSchema {
-                    account: account.name.clone(),
-                    database: account.database.clone(),
-                    schema: schema.to_owned(),
-                    created,
-                    removed: remove,
-                });
             }
             Ok::<(), anyhow::Error>(())
         }
@@ -108,6 +126,45 @@ async fn run_inner(
         }
     }
     Ok(())
+}
+
+struct ManagedCandidate {
+    schema: String,
+    created: String,
+}
+
+impl ManagedCandidate {
+    fn finish(self, account: &str, database: &str, removed: bool) -> CleanedSchema {
+        CleanedSchema {
+            account: account.to_owned(),
+            database: database.to_owned(),
+            schema: self.schema,
+            created: self.created,
+            removed,
+        }
+    }
+}
+
+fn managed_candidates(result: QueryResult, prefix: &str) -> Vec<ManagedCandidate> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let schema = row.first()?.as_deref()?;
+            let comment = row.get(1)?.as_deref()?;
+            if !is_managed_prefix(schema, prefix) || parse_ownership_marker(comment).is_none() {
+                return None;
+            }
+            Some(ManagedCandidate {
+                schema: schema.to_owned(),
+                created: row
+                    .get(2)
+                    .and_then(Option::as_deref)
+                    .unwrap_or("unknown")
+                    .to_owned(),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn parse_ownership_marker(comment: &str) -> Option<Uuid> {

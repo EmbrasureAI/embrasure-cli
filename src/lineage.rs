@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     dbt::{Manifest, ManifestNode},
+    provider::SqlDialect,
     report::{ColumnLineageEdge, ColumnLineageGap},
 };
 
@@ -20,6 +21,15 @@ const SCRIPT: &str = include_str!("sqlglot_lineage.py");
 #[derive(Serialize)]
 struct Request<'a> {
     models: Vec<ModelRequest<'a>>,
+}
+
+#[derive(Serialize)]
+struct Invocation<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dialect: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unquoted_case: Option<&'static str>,
+    models: &'a [ModelRequest<'a>],
 }
 
 #[derive(Serialize)]
@@ -64,6 +74,7 @@ pub struct Extraction {
 
 pub fn extract(
     account: &str,
+    dialect: SqlDialect,
     current: &Manifest,
     production: &Manifest,
     compiled: &Manifest,
@@ -106,7 +117,7 @@ pub fn extract(
         });
     }
 
-    let response = invoke(&Request { models })?;
+    let response = invoke(&Request { models }, Some(dialect))?;
     let mut edges = Vec::new();
     for model in response.models {
         let Some(target) = current.nodes.get(&model.unique_id) else {
@@ -157,15 +168,15 @@ pub fn extract(
 }
 
 pub fn probe() -> Result<String> {
-    Ok(invoke(&Request { models: vec![] })?.sqlglot_version)
+    Ok(invoke(&Request { models: vec![] }, None)?.sqlglot_version)
 }
 
-fn invoke(request: &Request<'_>) -> Result<Response> {
+fn invoke(request: &Request<'_>, dialect: Option<SqlDialect>) -> Result<Response> {
     let bundled = bundled_sqlglot_path()?;
     let commands = python_commands();
     let mut last_not_found = None;
     for command in commands {
-        match invoke_with(request, bundled.as_deref(), &command) {
+        match invoke_with(request, dialect, bundled.as_deref(), &command) {
             Err(error)
                 if error
                     .downcast_ref::<std::io::Error>()
@@ -188,6 +199,7 @@ struct PythonCommand {
 
 fn invoke_with(
     request: &Request<'_>,
+    dialect: Option<SqlDialect>,
     bundled: Option<&Path>,
     python: &PythonCommand,
 ) -> Result<Response> {
@@ -210,7 +222,11 @@ fn invoke_with(
             .stdin
             .as_mut()
             .context("SQLGlot stdin was not available")?,
-        request,
+        &Invocation {
+            dialect: dialect.map(SqlDialect::sqlglot_name),
+            unquoted_case: dialect.map(SqlDialect::sqlglot_unquoted_case),
+            models: &request.models,
+        },
     )?;
     child
         .stdin
@@ -535,7 +551,7 @@ mod tests {
                 sql: "with orders as (select customer_id, amount from raw.orders) select customer_id, sum(amount) as total from orders group by 1",
             }],
         };
-        let response = invoke(&request).unwrap();
+        let response = invoke(&request, Some(SqlDialect::Snowflake)).unwrap();
         let model = &response.models[0];
         assert!(model.gaps.is_empty());
         assert!(model.edges.iter().any(|edge| {
@@ -547,6 +563,24 @@ mod tests {
             edge.output_column == "TOTAL"
                 && edge.source_relation == "RAW.ORDERS"
                 && edge.source_column == "AMOUNT"
+        }));
+    }
+
+    #[test]
+    fn sqlglot_uses_databricks_identifier_rules() {
+        let request = Request {
+            models: vec![ModelRequest {
+                unique_id: "model.project.summary",
+                sql: "select Customer_ID, cast(Amount as double) as Total from Analytics.Raw.Orders",
+            }],
+        };
+        let response = invoke(&request, Some(SqlDialect::Databricks)).unwrap();
+        let edges = &response.models[0].edges;
+        assert!(response.models[0].gaps.is_empty());
+        assert!(edges.iter().any(|edge| {
+            edge.output_column == "customer_id"
+                && edge.source_relation == "analytics.raw.orders"
+                && edge.source_column == "customer_id"
         }));
     }
 
@@ -572,7 +606,7 @@ mod tests {
                 },
             ],
         };
-        let response = invoke(&request).unwrap();
+        let response = invoke(&request, Some(SqlDialect::Snowflake)).unwrap();
         assert!(response.models.iter().all(|model| model.gaps.is_empty()));
 
         let case_join = response
@@ -629,7 +663,7 @@ mod tests {
                 sql: "select from definitely not valid",
             }],
         };
-        let response = invoke(&request).unwrap();
+        let response = invoke(&request, Some(SqlDialect::Snowflake)).unwrap();
         let gap = &response.models[0].gaps[0];
         assert_eq!(
             gap,
@@ -647,7 +681,7 @@ mod tests {
                 sql: "select * from raw.orders",
             }],
         };
-        let response = invoke(&request).unwrap();
+        let response = invoke(&request, Some(SqlDialect::Snowflake)).unwrap();
         assert!(response.models[0].edges.is_empty());
         assert!(response.models[0].gaps[0].contains("cannot be expanded"));
     }
@@ -660,7 +694,7 @@ mod tests {
                 sql: "select current_timestamp() as loaded_at",
             }],
         };
-        let response = invoke(&request).unwrap();
+        let response = invoke(&request, Some(SqlDialect::Snowflake)).unwrap();
         assert!(response.models[0].edges.is_empty());
         assert!(response.models[0].gaps.is_empty());
     }
@@ -673,7 +707,7 @@ mod tests {
                 sql: "select source.\"CamelCase\" as \"OutputCase\" from raw.orders source",
             }],
         };
-        let response = invoke(&request).unwrap();
+        let response = invoke(&request, Some(SqlDialect::Snowflake)).unwrap();
         assert_eq!(response.models[0].edges[0].source_column, "CamelCase");
         assert_eq!(response.models[0].edges[0].output_column, "OutputCase");
     }
@@ -686,7 +720,7 @@ mod tests {
                 sql: "select id, amount from raw.orders union all select id, amount from raw.archive",
             }],
         };
-        let response = invoke(&request).unwrap();
+        let response = invoke(&request, Some(SqlDialect::Snowflake)).unwrap();
         let output_columns = response.models[0]
             .edges
             .iter()
@@ -714,6 +748,7 @@ mod tests {
 
         let extraction = extract(
             "primary",
+            SqlDialect::Snowflake,
             &current,
             &production,
             &compiled,
@@ -760,6 +795,7 @@ mod tests {
 
         let extraction = extract(
             "primary",
+            SqlDialect::Snowflake,
             &current,
             &production,
             &compiled,
@@ -803,6 +839,7 @@ mod tests {
 
         let extraction = extract(
             "primary",
+            SqlDialect::Snowflake,
             &current,
             &production,
             &compiled,
@@ -841,6 +878,7 @@ mod tests {
 
         let extraction = extract(
             "primary",
+            SqlDialect::Snowflake,
             &current,
             &manifest(vec![]),
             &compiled,

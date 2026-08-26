@@ -1,6 +1,6 @@
 {
     "version": "@VERSION@",
-    "description": "Validate dbt changes against production Snowflake data",
+    "description": "Validate dbt changes against production warehouse data",
     "homepage": "https://github.com/EmbrasureAI/embrasure-cli",
     "license": "Apache-2.0",
     "architecture": {

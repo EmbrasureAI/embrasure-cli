@@ -4,12 +4,12 @@ version = "0.5.3"
 edition = "2024"
 rust-version = "1.88"
 build = "build.rs"
-description = "Embrasure CLI for validating dbt changes against production Snowflake data"
+description = "Embrasure CLI for validating dbt changes against production warehouse data"
 license = "Apache-2.0"
 repository = "https://github.com/EmbrasureAI/embrasure-cli"
 homepage = "https://embrasure.ai"
 readme = "README.md"
-keywords = ["dbt", "snowflake", "data-quality", "cli"]
+keywords = ["dbt", "snowflake", "databricks", "data-quality", "cli"]
 categories = ["command-line-utilities", "development-tools::testing"]
 
 [[bin]]
@@ -60,7 +60,7 @@ strip = true
 
 [package.metadata.winresource]
 ProductName = "Embrasure"
-FileDescription = "Validate dbt changes against production Snowflake data"
+FileDescription = "Validate dbt changes against production warehouse data"
 CompanyName = "Embrasure, Inc."
 LegalCopyright = "Copyright 2026 Embrasure, Inc."
 OriginalFilename = "embrasure.exe"

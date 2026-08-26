@@ -212,17 +212,106 @@ impl Default for Thresholds {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "AccountConfigWire")]
 pub struct AccountConfig {
     pub name: String,
+    pub selector: Option<String>,
+    pub provider: ProviderConfig,
+    pub(crate) legacy: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum AccountConfigWire {
+    Tagged(TaggedAccountConfig),
+    Legacy(LegacySnowflakeAccountConfig),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaggedAccountConfig {
+    name: String,
+    selector: Option<String>,
+    provider: ProviderConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySnowflakeAccountConfig {
+    name: String,
+    account: String,
+    user: String,
+    role: String,
+    database: String,
+    warehouse: String,
+    production_schema: String,
+    selector: Option<String>,
+    auth: AuthConfig,
+}
+
+impl From<AccountConfigWire> for AccountConfig {
+    fn from(value: AccountConfigWire) -> Self {
+        match value {
+            AccountConfigWire::Tagged(value) => Self {
+                name: value.name,
+                selector: value.selector,
+                provider: value.provider,
+                legacy: false,
+            },
+            AccountConfigWire::Legacy(value) => Self {
+                name: value.name,
+                selector: value.selector,
+                provider: ProviderConfig::Snowflake(SnowflakeConfig {
+                    account: value.account,
+                    user: value.user,
+                    role: value.role,
+                    database: value.database,
+                    warehouse: value.warehouse,
+                    production_schema: value.production_schema,
+                    auth: value.auth,
+                }),
+                legacy: true,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderConfig {
+    Snowflake(SnowflakeConfig),
+    Databricks(DatabricksConfig),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnowflakeConfig {
     pub account: String,
     pub user: String,
     pub role: String,
     pub database: String,
     pub warehouse: String,
     pub production_schema: String,
-    pub selector: Option<String>,
     pub auth: AuthConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatabricksConfig {
+    pub host: String,
+    pub http_path: String,
+    pub catalog: String,
+    pub production_schema: String,
+    pub auth: DatabricksAuthConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DatabricksAuthConfig {
+    Token {
+        #[serde(default = "default_databricks_token_env")]
+        token_env: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -242,6 +331,60 @@ pub enum AuthConfig {
         private_key_path: PathBuf,
         passphrase_env: Option<String>,
     },
+}
+
+impl AccountConfig {
+    pub fn database(&self) -> &str {
+        match &self.provider {
+            ProviderConfig::Snowflake(config) => &config.database,
+            ProviderConfig::Databricks(config) => &config.catalog,
+        }
+    }
+
+    pub fn production_schema(&self) -> &str {
+        match &self.provider {
+            ProviderConfig::Snowflake(config) => &config.production_schema,
+            ProviderConfig::Databricks(config) => &config.production_schema,
+        }
+    }
+
+    pub fn snowflake(&self) -> Option<&SnowflakeConfig> {
+        match &self.provider {
+            ProviderConfig::Snowflake(config) => Some(config),
+            ProviderConfig::Databricks(_) => None,
+        }
+    }
+
+    pub fn databricks(&self) -> Option<&DatabricksConfig> {
+        match &self.provider {
+            ProviderConfig::Snowflake(_) => None,
+            ProviderConfig::Databricks(config) => Some(config),
+        }
+    }
+}
+
+impl DatabricksConfig {
+    pub fn workspace_url(&self) -> String {
+        let host = self.host.trim_end_matches('/');
+        if host.starts_with("https://") {
+            host.to_owned()
+        } else {
+            format!("https://{host}")
+        }
+    }
+
+    pub fn dbt_host(&self) -> &str {
+        self.host
+            .strip_prefix("https://")
+            .unwrap_or(&self.host)
+            .trim_end_matches('/')
+    }
+
+    pub fn warehouse_id(&self) -> &str {
+        self.http_path
+            .strip_prefix("/sql/1.0/warehouses/")
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -335,11 +478,20 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.version != 1 {
-            bail!("unsupported config version {}; expected 1", self.version);
+        if !matches!(self.version, 1 | 2) {
+            bail!(
+                "unsupported config version {}; expected 1 or 2",
+                self.version
+            );
         }
         if self.accounts.is_empty() {
-            bail!("at least one Snowflake account is required");
+            bail!("at least one warehouse account is required");
+        }
+        if self.version == 1 && self.accounts.iter().any(|account| !account.legacy) {
+            bail!("config version 1 requires the legacy Snowflake account shape");
+        }
+        if self.version == 2 && self.accounts.iter().any(|account| account.legacy) {
+            bail!("config version 2 requires a tagged provider block for every account");
         }
         if self.dbt.profile.trim().is_empty() || self.dbt.command.trim().is_empty() {
             bail!("dbt profile and command must not be empty");
@@ -375,7 +527,7 @@ impl Config {
             bail!("statement timeout must be greater than zero");
         }
         if self.safety.statement_timeout_seconds > 604_800 {
-            bail!("statement timeout must not exceed Snowflake's 604800-second maximum");
+            bail!("statement timeout must not exceed 604800 seconds");
         }
         if self.comparison.concurrency == 0 || self.comparison.concurrency > 32 {
             bail!("comparison.concurrency must be between 1 and 32");
@@ -422,37 +574,7 @@ impl Config {
                 );
             }
             if !account_names.insert(account.name.to_ascii_lowercase()) {
-                bail!("Snowflake account names must be unique");
-            }
-            for (field, value) in [
-                ("name", &account.name),
-                ("account", &account.account),
-                ("user", &account.user),
-                ("role", &account.role),
-                ("database", &account.database),
-                ("warehouse", &account.warehouse),
-                ("production_schema", &account.production_schema),
-            ] {
-                if value.trim().is_empty() {
-                    bail!("account {} has an empty {field}", account.name);
-                }
-            }
-            if account.account.len() > 255
-                || account.account.starts_with(['.', '-'])
-                || account.account.ends_with(['.', '-'])
-                || account
-                    .account
-                    .to_ascii_lowercase()
-                    .ends_with(".snowflakecomputing.com")
-                || !account.account.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-                })
-                || account.account.contains("..")
-            {
-                bail!(
-                    "account identifier {} is invalid; use the identifier only, without https:// or .snowflakecomputing.com",
-                    account.account
-                );
+                bail!("account names must be unique");
             }
             if account
                 .selector
@@ -461,28 +583,9 @@ impl Config {
             {
                 bail!("account {} has an empty dbt selector", account.name);
             }
-            match &account.auth {
-                AuthConfig::OauthLocal => {}
-                AuthConfig::Oauth { token_env }
-                | AuthConfig::ProgrammaticAccessToken { token_env } => {
-                    if token_env.trim().is_empty() {
-                        bail!("account {} has an empty token_env", account.name);
-                    }
-                }
-                AuthConfig::KeyPair {
-                    private_key_path,
-                    passphrase_env,
-                } => {
-                    if private_key_path.as_os_str().is_empty() {
-                        bail!("account {} has an empty private_key_path", account.name);
-                    }
-                    if passphrase_env
-                        .as_ref()
-                        .is_some_and(|value| value.trim().is_empty())
-                    {
-                        bail!("account {} has an empty passphrase_env", account.name);
-                    }
-                }
+            match &account.provider {
+                ProviderConfig::Snowflake(config) => validate_snowflake(account, config)?,
+                ProviderConfig::Databricks(config) => validate_databricks(account, config)?,
             }
         }
         let mut check_names = BTreeSet::new();
@@ -573,9 +676,13 @@ impl Config {
             self.dbt.state_dir = Some(absolute_from(root, path)?);
         }
         for account in &mut self.accounts {
-            if let AuthConfig::KeyPair {
-                private_key_path, ..
-            } = &mut account.auth
+            if let ProviderConfig::Snowflake(SnowflakeConfig {
+                auth:
+                    AuthConfig::KeyPair {
+                        private_key_path, ..
+                    },
+                ..
+            }) = &mut account.provider
             {
                 let expanded = expand_home(private_key_path)?;
                 *private_key_path = if expanded.is_absolute() {
@@ -587,6 +694,108 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn validate_snowflake(account: &AccountConfig, config: &SnowflakeConfig) -> Result<()> {
+    for (field, value) in [
+        ("account", &config.account),
+        ("user", &config.user),
+        ("role", &config.role),
+        ("database", &config.database),
+        ("warehouse", &config.warehouse),
+        ("production_schema", &config.production_schema),
+    ] {
+        if value.trim().is_empty() {
+            bail!("account {} has an empty {field}", account.name);
+        }
+    }
+    if config.account.len() > 255
+        || config.account.starts_with(['.', '-'])
+        || config.account.ends_with(['.', '-'])
+        || config
+            .account
+            .to_ascii_lowercase()
+            .ends_with(".snowflakecomputing.com")
+        || !config.account.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+        || config.account.contains("..")
+    {
+        bail!(
+            "account identifier {} is invalid; use the identifier only, without https:// or .snowflakecomputing.com",
+            config.account
+        );
+    }
+    match &config.auth {
+        AuthConfig::OauthLocal => {}
+        AuthConfig::Oauth { token_env } | AuthConfig::ProgrammaticAccessToken { token_env } => {
+            if token_env.trim().is_empty() {
+                bail!("account {} has an empty token_env", account.name);
+            }
+        }
+        AuthConfig::KeyPair {
+            private_key_path,
+            passphrase_env,
+        } => {
+            if private_key_path.as_os_str().is_empty() {
+                bail!("account {} has an empty private_key_path", account.name);
+            }
+            if passphrase_env
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                bail!("account {} has an empty passphrase_env", account.name);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_databricks(account: &AccountConfig, config: &DatabricksConfig) -> Result<()> {
+    for (field, value) in [
+        ("host", &config.host),
+        ("http_path", &config.http_path),
+        ("catalog", &config.catalog),
+        ("production_schema", &config.production_schema),
+    ] {
+        if value.trim().is_empty() {
+            bail!("account {} has an empty {field}", account.name);
+        }
+    }
+    let workspace_url = url::Url::parse(&config.workspace_url())
+        .with_context(|| format!("account {} has an invalid Databricks host", account.name))?;
+    if workspace_url.scheme() != "https"
+        || workspace_url.host_str().is_none()
+        || !workspace_url.username().is_empty()
+        || workspace_url.password().is_some()
+        || workspace_url.path() != "/"
+        || workspace_url.query().is_some()
+        || workspace_url.fragment().is_some()
+    {
+        bail!(
+            "account {} Databricks host must be an HTTPS workspace hostname without a path",
+            account.name
+        );
+    }
+    let warehouse_id = config.warehouse_id();
+    if warehouse_id.is_empty()
+        || warehouse_id.contains('/')
+        || !warehouse_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        bail!(
+            "account {} http_path must be /sql/1.0/warehouses/<warehouse-id>",
+            account.name
+        );
+    }
+    match &config.auth {
+        DatabricksAuthConfig::Token { token_env } if token_env.trim().is_empty() => {
+            bail!("account {} has an empty token_env", account.name)
+        }
+        DatabricksAuthConfig::Token { .. } => {}
+    }
+    Ok(())
 }
 
 fn absolute_from(root: &Path, path: &Path) -> Result<PathBuf> {
@@ -671,6 +880,9 @@ fn default_oauth_env() -> String {
 }
 fn default_pat_env() -> String {
     "SNOWFLAKE_PROGRAMMATIC_ACCESS_TOKEN".into()
+}
+fn default_databricks_token_env() -> String {
+    "DATABRICKS_TOKEN".into()
 }
 fn default_metabase_env() -> String {
     "METABASE_API_KEY".into()
@@ -800,6 +1012,39 @@ accounts:
     }
 
     #[test]
+    fn version_two_accepts_a_typed_databricks_provider() {
+        let yaml = r#"
+version: 2
+accounts:
+  - name: lakehouse
+    provider:
+      type: databricks
+      host: https://example.cloud.databricks.com
+      http_path: /sql/1.0/warehouses/abc123
+      catalog: analytics
+      production_schema: prod
+      auth: { type: token, token_env: DATABRICKS_TOKEN }
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.accounts[0].database(), "analytics");
+        assert!(matches!(
+            config.accounts[0].provider,
+            ProviderConfig::Databricks(_)
+        ));
+
+        let invalid = yaml.replace("/sql/1.0/warehouses/abc123", "/sql/protocolv1/o/cluster");
+        let config: Config = serde_yaml::from_str(&invalid).unwrap();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("http_path")
+        );
+    }
+
+    #[test]
     fn rejects_account_names_that_can_escape_temporary_paths() {
         let yaml = r#"
 version: 1
@@ -848,9 +1093,12 @@ accounts:
         .unwrap();
         let mut config = Config::load(&config_path).unwrap();
         config.resolve_from(&config_path).unwrap();
-        let AuthConfig::KeyPair {
-            private_key_path, ..
-        } = &config.accounts[0].auth
+        let ProviderConfig::Snowflake(SnowflakeConfig {
+            auth: AuthConfig::KeyPair {
+                private_key_path, ..
+            },
+            ..
+        }) = &config.accounts[0].provider
         else {
             panic!("expected key-pair auth");
         };

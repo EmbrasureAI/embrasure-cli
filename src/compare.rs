@@ -4,17 +4,18 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     config::{ComparisonMode, KeyPolicy, SafetyConfig, Thresholds},
+    provider::{QueryExecutor, Relation, ResultColumn, SqlDialect},
     report::{ColumnComparison, ColumnMetrics, Finding, ModelComparison, PrimaryKeyComparison},
-    snowflake::{Relation, ResultColumn, SnowflakeClient, quote_identifier},
 };
 
-pub async fn compare_model(
-    client: &SnowflakeClient,
+pub async fn compare_model<E: QueryExecutor + ?Sized>(
+    client: &E,
     model_id: &str,
     ci: &Relation,
     production: &Relation,
     options: CompareOptions<'_>,
 ) -> Result<(ModelComparison, Vec<Finding>)> {
+    let dialect = client.dialect();
     let CompareOptions {
         primary_key,
         where_clause,
@@ -25,10 +26,15 @@ pub async fn compare_model(
     } = options;
     let ci_columns = relation_columns(client, ci)
         .await
-        .with_context(|| format!("could not inspect CI relation {}", ci.sql()))?;
+        .with_context(|| format!("could not inspect CI relation {}", ci.sql(dialect)))?;
     let production_columns = relation_columns(client, production)
         .await
-        .with_context(|| format!("could not inspect production relation {}", production.sql()))?;
+        .with_context(|| {
+            format!(
+                "could not inspect production relation {}",
+                production.sql(dialect)
+            )
+        })?;
     let ci_map = column_map(&ci_columns);
     let production_map = column_map(&production_columns);
     let all_names = ci_map
@@ -129,8 +135,8 @@ pub async fn compare_model(
                     ci_value.cardinality, prod_value.cardinality, cardinality_change, cardinality_threshold,
                 )));
             }
-            let numeric = ci_column.is_some_and(|column| is_numeric(&column.data_type))
-                && prod_column.is_some_and(|column| is_numeric(&column.data_type));
+            let numeric = ci_column.is_some_and(|column| dialect.is_numeric(&column.data_type))
+                && prod_column.is_some_and(|column| dialect.is_numeric(&column.data_type));
             for (metric, ci_number, prod_number) in [
                 ("average", ci_value.average, prod_value.average),
                 ("p05", ci_value.p05, prod_value.p05),
@@ -182,57 +188,76 @@ pub async fn compare_model(
         });
     }
 
+    let resolved_primary_key = primary_key
+        .iter()
+        .map(|key| {
+            let ci_name = resolve_column(&ci_map, key)?;
+            let production_name = resolve_column(&production_map, key)?;
+            (ci_name == production_name).then_some(ci_name)
+        })
+        .collect::<Option<Vec<_>>>();
     let primary_key = if primary_key.is_empty() {
         None
-    } else if primary_key.iter().all(|key| {
-        matches!(
-            (resolve_column(&ci_map, key), resolve_column(&production_map, key)),
-            (Some(ci_name), Some(production_name)) if ci_name == production_name
-        )
-    }) {
-        let resolved_primary_key = primary_key
-            .iter()
-            .filter_map(|key| resolve_column(&ci_map, key))
-            .collect::<Vec<_>>();
-        let comparison = compare_primary_key(
-            client,
-            ci,
-            production,
-            &resolved_primary_key,
-            safety.primary_key_sample_limit,
-            where_clause,
-        )
-        .await?;
-        if comparison.ci_only_count > 0 || comparison.production_only_count > 0 {
+    } else if let Some(resolved_primary_key) = resolved_primary_key {
+        let unsupported_key = resolved_primary_key.iter().find_map(|key| {
+            [&ci_map, &production_map].into_iter().find_map(|columns| {
+                columns.get(key).and_then(|column| {
+                    dialect
+                        .is_unsupported_value(&column.data_type)
+                        .then_some((key, column.data_type.as_str()))
+                })
+            })
+        });
+        if let Some((key, data_type)) = unsupported_key {
             findings.push(finding(
                 model_id,
                 "primary_key",
                 format!(
-                    "{} primary-key values exist only in CI and {} only in production",
-                    comparison.ci_only_count, comparison.production_only_count,
+                    "primary-key column {key} has unsupported type {data_type}; configure a scalar key"
                 ),
             ));
+            None
+        } else {
+            let comparison = compare_primary_key(
+                client,
+                ci,
+                production,
+                &resolved_primary_key,
+                safety.primary_key_sample_limit,
+                where_clause,
+            )
+            .await?;
+            if comparison.ci_only_count > 0 || comparison.production_only_count > 0 {
+                findings.push(finding(
+                    model_id,
+                    "primary_key",
+                    format!(
+                        "{} primary-key values exist only in CI and {} only in production",
+                        comparison.ci_only_count, comparison.production_only_count,
+                    ),
+                ));
+            }
+            if key_integrity_fails(&comparison, key_policy) {
+                findings.push(finding(
+                    model_id,
+                    "primary_key",
+                    format!(
+                        "CI has {} duplicate keys ({} extra rows) and {} null-key rows vs {} ({} extra rows) and {} in production ({})",
+                        comparison.ci_duplicate_key_count,
+                        comparison.ci_duplicate_rows,
+                        comparison.ci_null_key_rows,
+                        comparison.production_duplicate_key_count,
+                        comparison.production_duplicate_rows,
+                        comparison.production_null_key_rows,
+                        match key_policy {
+                            KeyPolicy::Regression => "regressions fail",
+                            KeyPolicy::Strict => "strict policy requires zero",
+                        }
+                    ),
+                ));
+            }
+            Some(comparison)
         }
-        if key_integrity_fails(&comparison, key_policy) {
-            findings.push(finding(
-                model_id,
-                "primary_key",
-                format!(
-                    "CI has {} duplicate keys ({} extra rows) and {} null-key rows vs {} ({} extra rows) and {} in production ({})",
-                    comparison.ci_duplicate_key_count,
-                    comparison.ci_duplicate_rows,
-                    comparison.ci_null_key_rows,
-                    comparison.production_duplicate_key_count,
-                    comparison.production_duplicate_rows,
-                    comparison.production_null_key_rows,
-                    match key_policy {
-                        KeyPolicy::Regression => "regressions fail",
-                        KeyPolicy::Strict => "strict policy requires zero",
-                    }
-                ),
-            ));
-        }
-        Some(comparison)
     } else {
         findings.push(finding(
             model_id,
@@ -276,12 +301,13 @@ pub struct CompareOptions<'a> {
     pub thresholds: Thresholds,
 }
 
-async fn relation_columns(
-    client: &SnowflakeClient,
+async fn relation_columns<E: QueryExecutor + ?Sized>(
+    client: &E,
     relation: &Relation,
 ) -> Result<Vec<ResultColumn>> {
+    let dialect = client.dialect();
     Ok(client
-        .execute(&format!("SELECT * FROM {} LIMIT 0", relation.sql()))
+        .execute(&format!("SELECT * FROM {} LIMIT 0", relation.sql(dialect)))
         .await?
         .columns)
 }
@@ -292,47 +318,50 @@ struct RelationMetrics {
     columns: BTreeMap<String, ColumnMetrics>,
 }
 
-async fn relation_metrics(
-    client: &SnowflakeClient,
+async fn relation_metrics<E: QueryExecutor + ?Sized>(
+    client: &E,
     relation: &Relation,
     names: &[String],
     types: &BTreeMap<String, ResultColumn>,
     where_clause: Option<&str>,
     mode: ComparisonMode,
 ) -> Result<RelationMetrics> {
+    let dialect = client.dialect();
     let mut expressions = vec!["COUNT(*)".to_owned()];
     for name in names {
-        let column = quote_identifier(name);
-        expressions.push(format!("COUNT_IF({column} IS NULL)"));
+        let column = dialect.quote_identifier(name);
+        let data_type = types
+            .get(name)
+            .map(|value| value.data_type.as_str())
+            .unwrap_or_default();
+        if !dialect.supports_column_metrics(data_type) {
+            continue;
+        }
+        expressions.push(dialect.count_if(&format!("{column} IS NULL")));
         expressions.push(match mode {
-            ComparisonMode::Quick => format!("APPROX_COUNT_DISTINCT({column})"),
+            ComparisonMode::Quick => dialect.approximate_distinct(&column),
             ComparisonMode::Deep => format!("COUNT(DISTINCT {column})"),
         });
-        if types
-            .get(name)
-            .is_some_and(|value| is_orderable(&value.data_type))
-        {
-            expressions.push(format!("MIN({column})::VARCHAR"));
-            expressions.push(format!("MAX({column})::VARCHAR"));
+        if !data_type.is_empty() && dialect.is_orderable(data_type) {
+            expressions.push(dialect.cast_text(&format!("MIN({column})")));
+            expressions.push(dialect.cast_text(&format!("MAX({column})")));
         } else {
-            expressions.push("NULL::VARCHAR".into());
-            expressions.push("NULL::VARCHAR".into());
+            expressions.push(dialect.cast_text("NULL"));
+            expressions.push(dialect.cast_text("NULL"));
         }
         if types
             .get(name)
-            .is_some_and(|value| is_numeric(&value.data_type))
+            .is_some_and(|value| dialect.is_numeric(&value.data_type))
         {
-            expressions.push(format!("AVG({column})::DOUBLE"));
+            expressions.push(dialect.cast_float(&format!("AVG({column})")));
             if mode == ComparisonMode::Deep {
-                expressions.extend([
-                    format!("APPROX_PERCENTILE({column}, 0.05)::DOUBLE"),
-                    format!("APPROX_PERCENTILE({column}, 0.50)::DOUBLE"),
-                    format!("APPROX_PERCENTILE({column}, 0.95)::DOUBLE"),
-                ]);
+                expressions.extend(["0.05", "0.50", "0.95"].map(|percentile| {
+                    dialect.cast_float(&dialect.approximate_percentile(&column, percentile))
+                }));
             }
         }
     }
-    let source = filtered_relation(relation, where_clause);
+    let source = filtered_relation(dialect, relation, where_clause);
     let result = client
         .execute(&format!(
             "SELECT {} FROM {}",
@@ -343,11 +372,18 @@ async fn relation_metrics(
     let row = result
         .rows
         .first()
-        .context("Snowflake aggregate returned no row")?;
+        .context("warehouse aggregate returned no row")?;
     let row_count = parse_u64(row.first().and_then(Option::as_deref))?;
     let mut index = 1;
     let mut columns = BTreeMap::new();
     for name in names {
+        let data_type = types
+            .get(name)
+            .map(|value| value.data_type.as_str())
+            .unwrap_or_default();
+        if !dialect.supports_column_metrics(data_type) {
+            continue;
+        }
         let null_count = parse_u64(row.get(index).and_then(Option::as_deref))?;
         let cardinality = parse_u64(row.get(index + 1).and_then(Option::as_deref))?;
         let min = row.get(index + 2).cloned().flatten();
@@ -367,7 +403,7 @@ async fn relation_metrics(
         };
         if types
             .get(name)
-            .is_some_and(|value| is_numeric(&value.data_type))
+            .is_some_and(|value| dialect.is_numeric(&value.data_type))
         {
             metrics.average = parse_optional_f64(row.get(index).and_then(Option::as_deref))?;
             index += 1;
@@ -383,21 +419,22 @@ async fn relation_metrics(
     Ok(RelationMetrics { row_count, columns })
 }
 
-async fn compare_primary_key(
-    client: &SnowflakeClient,
+async fn compare_primary_key<E: QueryExecutor + ?Sized>(
+    client: &E,
     ci: &Relation,
     production: &Relation,
     keys: &[String],
     sample_limit: usize,
     where_clause: Option<&str>,
 ) -> Result<PrimaryKeyComparison> {
+    let dialect = client.dialect();
     let selected = keys
         .iter()
-        .map(|key| quote_identifier(key))
+        .map(|key| dialect.quote_identifier(key))
         .collect::<Vec<_>>()
         .join(", ");
-    let ci_source = filtered_relation(ci, where_clause);
-    let production_source = filtered_relation(production, where_clause);
+    let ci_source = filtered_relation(dialect, ci, where_clause);
+    let production_source = filtered_relation(dialect, production, where_clause);
     let ci_keys = format!(
         "SELECT {selected}, COUNT(*) AS KEY_ROWS, 1 AS PRESENT FROM {ci_source} GROUP BY {selected}"
     );
@@ -407,37 +444,63 @@ async fn compare_primary_key(
     let join = keys
         .iter()
         .map(|key| {
-            let key = quote_identifier(key);
-            format!("EQUAL_NULL(C.{key}, P.{key})")
+            let key = dialect.quote_identifier(key);
+            dialect.null_safe_equal(&format!("C.{key}"), &format!("P.{key}"))
         })
         .collect::<Vec<_>>()
         .join(" AND ");
     let ci_null = keys
         .iter()
-        .map(|key| format!("C.{} IS NULL", quote_identifier(key)))
+        .map(|key| format!("C.{} IS NULL", dialect.quote_identifier(key)))
         .collect::<Vec<_>>()
         .join(" OR ");
     let production_null = keys
         .iter()
-        .map(|key| format!("P.{} IS NULL", quote_identifier(key)))
+        .map(|key| format!("P.{} IS NULL", dialect.quote_identifier(key)))
         .collect::<Vec<_>>()
         .join(" OR ");
     let ci_null_unqualified = keys
         .iter()
-        .map(|key| format!("{} IS NULL", quote_identifier(key)))
+        .map(|key| format!("{} IS NULL", dialect.quote_identifier(key)))
         .collect::<Vec<_>>()
         .join(" OR ");
+    let ci_duplicate_rows = dialect.conditional(
+        &format!("C.PRESENT IS NOT NULL AND NOT ({ci_null})"),
+        "GREATEST(C.KEY_ROWS - 1, 0)",
+        "0",
+    );
+    let production_duplicate_rows = dialect.conditional(
+        &format!("P.PRESENT IS NOT NULL AND NOT ({production_null})"),
+        "GREATEST(P.KEY_ROWS - 1, 0)",
+        "0",
+    );
+    let ci_null_rows = dialect.conditional(
+        &format!("C.PRESENT IS NOT NULL AND ({ci_null})"),
+        "C.KEY_ROWS",
+        "0",
+    );
+    let production_null_rows = dialect.conditional(
+        &format!("P.PRESENT IS NOT NULL AND ({production_null})"),
+        "P.KEY_ROWS",
+        "0",
+    );
     let counts = client
         .execute(&format!(
             "WITH CI_KEYS AS ({ci_keys}), PRODUCTION_KEYS AS ({production_keys}) \
-             SELECT COUNT_IF(P.PRESENT IS NULL), COUNT_IF(C.PRESENT IS NULL), \
-             COUNT_IF(C.PRESENT IS NOT NULL AND NOT ({ci_null}) AND C.KEY_ROWS > 1), \
-             COUNT_IF(P.PRESENT IS NOT NULL AND NOT ({production_null}) AND P.KEY_ROWS > 1), \
-             COALESCE(SUM(IFF(C.PRESENT IS NOT NULL AND NOT ({ci_null}), GREATEST(C.KEY_ROWS - 1, 0), 0)), 0), \
-             COALESCE(SUM(IFF(P.PRESENT IS NOT NULL AND NOT ({production_null}), GREATEST(P.KEY_ROWS - 1, 0), 0)), 0), \
-             COALESCE(SUM(IFF(C.PRESENT IS NOT NULL AND ({ci_null}), C.KEY_ROWS, 0)), 0), \
-             COALESCE(SUM(IFF(P.PRESENT IS NOT NULL AND ({production_null}), P.KEY_ROWS, 0)), 0) \
-             FROM CI_KEYS C FULL OUTER JOIN PRODUCTION_KEYS P ON {join}"
+             SELECT {}, {}, {}, {}, \
+             COALESCE(SUM({ci_duplicate_rows}), 0), \
+             COALESCE(SUM({production_duplicate_rows}), 0), \
+             COALESCE(SUM({ci_null_rows}), 0), \
+             COALESCE(SUM({production_null_rows}), 0) \
+             FROM CI_KEYS C FULL OUTER JOIN PRODUCTION_KEYS P ON {join}",
+            dialect.count_if("P.PRESENT IS NULL"),
+            dialect.count_if("C.PRESENT IS NULL"),
+            dialect.count_if(&format!(
+                "C.PRESENT IS NOT NULL AND NOT ({ci_null}) AND C.KEY_ROWS > 1"
+            )),
+            dialect.count_if(&format!(
+                "P.PRESENT IS NOT NULL AND NOT ({production_null}) AND P.KEY_ROWS > 1"
+            )),
         ))
         .await?;
     let row = counts
@@ -454,12 +517,12 @@ async fn compare_primary_key(
     let production_null_key_rows = parse_u64(row.get(7).and_then(Option::as_deref))?;
     let ci_selected = keys
         .iter()
-        .map(|key| format!("C.{}", quote_identifier(key)))
+        .map(|key| format!("C.{}", dialect.quote_identifier(key)))
         .collect::<Vec<_>>()
         .join(", ");
     let production_selected = keys
         .iter()
-        .map(|key| format!("P.{}", quote_identifier(key)))
+        .map(|key| format!("P.{}", dialect.quote_identifier(key)))
         .collect::<Vec<_>>()
         .join(", ");
     let ci_examples = if ci_only_count == 0 {
@@ -515,10 +578,14 @@ async fn compare_primary_key(
     })
 }
 
-fn filtered_relation(relation: &Relation, where_clause: Option<&str>) -> String {
+fn filtered_relation(
+    dialect: SqlDialect,
+    relation: &Relation,
+    where_clause: Option<&str>,
+) -> String {
     match where_clause {
-        Some(predicate) => format!("{} WHERE ({predicate})", relation.sql()),
-        None => relation.sql(),
+        Some(predicate) => format!("{} WHERE ({predicate})", relation.sql(dialect)),
+        None => relation.sql(dialect),
     }
 }
 
@@ -544,38 +611,6 @@ fn resolve_column(columns: &BTreeMap<String, ResultColumn>, configured: &str) ->
     }
 }
 
-fn is_numeric(data_type: &str) -> bool {
-    let normalized = data_type.to_ascii_lowercase();
-    normalized.starts_with("number(")
-        || normalized.starts_with("numeric(")
-        || normalized.starts_with("decimal(")
-        || matches!(
-            normalized.as_str(),
-            "fixed"
-                | "real"
-                | "number"
-                | "numeric"
-                | "decimal"
-                | "float"
-                | "double"
-                | "int"
-                | "integer"
-                | "bigint"
-                | "smallint"
-        )
-}
-
-fn is_orderable(data_type: &str) -> bool {
-    !matches!(
-        data_type
-            .to_ascii_uppercase()
-            .split('(')
-            .next()
-            .unwrap_or_default(),
-        "ARRAY" | "OBJECT" | "VARIANT" | "BINARY" | "GEOGRAPHY" | "GEOMETRY"
-    )
-}
-
 fn relative_change(current: f64, production: f64) -> f64 {
     if current == production {
         0.0
@@ -586,7 +621,7 @@ fn relative_change(current: f64, production: f64) -> f64 {
 
 fn effective_cardinality_threshold(mode: ComparisonMode, thresholds: Thresholds) -> f64 {
     match mode {
-        // Snowflake's HLL estimate is fast but should not be treated as sub-percent precision.
+        // Approximate distinct counts should not be treated as sub-percent precision.
         ComparisonMode::Quick => thresholds.cardinality_relative.max(0.02),
         ComparisonMode::Deep => thresholds.cardinality_relative,
     }
@@ -594,9 +629,9 @@ fn effective_cardinality_threshold(mode: ComparisonMode, thresholds: Thresholds)
 
 fn parse_u64(value: Option<&str>) -> Result<u64> {
     value
-        .context("Snowflake returned NULL for an integer metric")?
+        .context("warehouse returned NULL for an integer metric")?
         .parse()
-        .context("Snowflake returned an invalid integer metric")
+        .context("warehouse returned an invalid integer metric")
 }
 
 fn parse_optional_f64(value: Option<&str>) -> Result<Option<f64>> {
@@ -604,9 +639,9 @@ fn parse_optional_f64(value: Option<&str>) -> Result<Option<f64>> {
         .map(|value| {
             let parsed: f64 = value
                 .parse()
-                .context("Snowflake returned an invalid numeric metric")?;
+                .context("warehouse returned an invalid numeric metric")?;
             if !parsed.is_finite() {
-                bail!("Snowflake returned a non-finite numeric metric: {value}");
+                bail!("warehouse returned a non-finite numeric metric: {value}");
             }
             Ok(parsed)
         })
@@ -646,7 +681,11 @@ mod tests {
             identifier: "ORDERS".into(),
         };
         assert_eq!(
-            filtered_relation(&relation, Some("ORDER_DATE >= CURRENT_DATE - 30")),
+            filtered_relation(
+                SqlDialect::Snowflake,
+                &relation,
+                Some("ORDER_DATE >= CURRENT_DATE - 30")
+            ),
             r#""D"."S"."ORDERS" WHERE (ORDER_DATE >= CURRENT_DATE - 30)"#
         );
     }
