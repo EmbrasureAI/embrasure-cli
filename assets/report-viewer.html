@@ -7,146 +7,129 @@
   <style>
     :root {
       color-scheme: light;
-      --ink: #17231f;
-      --muted: #66736e;
-      --line: #dce3df;
-      --paper: #ffffff;
-      --canvas: #f5f7f6;
-      --green: #197454;
-      --green-soft: #e7f5ef;
-      --red: #bd493b;
-      --red-soft: #fcedea;
-      --amber: #a86b17;
-      --amber-soft: #fff3dc;
-      --blue: #3d649e;
-      --blue-soft: #edf3fb;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --background: oklch(98.4% .0015 256);
+      --surface: oklch(99.4% .001 256);
+      --foreground: oklch(24% .005 256);
+      --muted: oklch(46% .006 256);
+      --muted-soft: oklch(54% .006 256);
+      --border: oklch(91% .003 256);
+      --border-soft: oklch(94% .002 256);
+      --brand: oklch(40% .092 254);
+      --brand-tint: oklch(92% .018 254);
+      --highlight: oklch(66% .098 64);
+      --danger: oklch(48% .15 32);
+      --success: oklch(50% .09 156);
+      font-family: Inter, "Helvetica Neue", Arial, sans-serif;
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; }
-    body { margin: 0; color: var(--ink); background: var(--canvas); }
+    body { margin: 0; color: var(--foreground); background: var(--background); }
     button { font: inherit; }
     .app { min-height: 100%; display: flex; flex-direction: column; }
     .topbar {
-      min-height: 62px; display: flex; align-items: center; justify-content: space-between;
-      gap: 24px; padding: 0 24px; color: #f7fbf8; background: #14241e;
+      min-height: 54px; display: flex; align-items: center; justify-content: space-between;
+      gap: 24px; padding: 0 22px; color: #f4f6f4; background: #111316;
     }
-    .brand { font-size: 18px; font-weight: 650; letter-spacing: -.02em; }
-    .run-base { min-width: 0; color: #b9c8c1; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .overview {
-      display: flex; align-items: center; justify-content: space-between; gap: 24px;
-      padding: 18px 24px; border-bottom: 1px solid var(--line); background: var(--paper);
+    .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .brand img { width: 30px; height: 30px; object-fit: contain; }
+    .brand-name { font-family: Georgia, serif; font-size: 17px; letter-spacing: -.015em; }
+    .brand-separator { width: 1px; height: 16px; margin: 0 2px; background: #45494d; }
+    .brand-section { color: #aeb2b5; font-size: 12px; }
+    .run-base { min-width: 0; color: #9ea3a6; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .report-head {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 20px;
+      min-height: 72px; padding: 15px 22px; border-bottom: 1px solid var(--border); background: var(--surface);
     }
-    .result { display: flex; align-items: center; gap: 12px; min-width: 0; }
-    .result-mark { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--green); }
-    .result-mark.findings, .result-mark.execution_failure { background: var(--red); }
-    .result-mark.incomplete { background: var(--amber); }
-    .result-title { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -.02em; }
-    .result-copy { margin-top: 3px; color: var(--muted); font-size: 13px; }
-    .metrics { display: flex; align-items: center; gap: 24px; flex: none; }
-    .metric { display: grid; gap: 2px; }
-    .metric strong { font-size: 16px; font-weight: 650; font-variant-numeric: tabular-nums; }
-    .metric span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
-    .workspace { flex: 1; min-height: 560px; display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
-    .graph-panel { min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+    .report-head h1 { margin: 0; font-family: Georgia, serif; font-size: 22px; font-weight: 400; letter-spacing: -.015em; }
+    .report-meta { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .report-state { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .report-state.findings, .report-state.execution_failure { color: var(--danger); }
+    .report-state.incomplete { color: #8a5b1c; }
+    .workspace { flex: 1; min-height: 550px; display: grid; grid-template-columns: minmax(0, 1fr) 348px; }
+    .graph-panel { min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
     .panel-head {
-      height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 20px;
-      padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--paper);
+      min-height: 46px; display: flex; align-items: baseline; justify-content: space-between; gap: 20px;
+      padding: 0 18px; border-bottom: 1px solid var(--border-soft); background: var(--surface);
     }
-    .panel-head h2 { margin: 0; font-size: 14px; font-weight: 650; }
-    .legend { display: flex; gap: 14px; color: var(--muted); font-size: 11px; }
-    .legend span { display: flex; align-items: center; gap: 5px; }
-    .legend i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
-    .legend .warn { background: var(--red); }
-    .legend .scope { background: var(--blue); }
-    .graph-viewport { position: relative; flex: 1; min-height: 500px; overflow: auto; background-color: var(--canvas); background-image: radial-gradient(#dbe2de 0.8px, transparent 0.8px); background-size: 20px 20px; }
+    .panel-head h2 { margin: 0; font-family: Georgia, serif; font-size: 14px; font-weight: 400; }
+    .panel-meta { color: var(--muted-soft); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .graph-viewport { position: relative; flex: 1; min-height: 500px; overflow: auto; background: var(--background); }
     .graph-stage { position: relative; min-width: 100%; min-height: 100%; }
     .edges { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
-    .edge { fill: none; stroke: #aab7b1; stroke-width: 1.5; }
-    .edge.is-connected { stroke: var(--green); stroke-width: 2.2; }
+    .edge { fill: none; stroke: #bdc2c6; stroke-width: 1.2; }
+    .edge.is-connected { stroke: var(--brand); stroke-width: 1.8; }
     .node {
-      position: absolute; width: 190px; min-height: 76px; padding: 12px 14px 11px 16px;
-      text-align: left; color: var(--ink); background: var(--paper); border: 1px solid var(--line);
-      border-left: 4px solid var(--green); border-radius: 7px; box-shadow: 0 2px 8px rgba(23,35,31,.06);
-      cursor: pointer; transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+      position: absolute; width: 178px; min-height: 62px; padding: 11px 12px 10px 14px;
+      text-align: left; color: var(--foreground); background: var(--surface); border: 1px solid var(--border);
+      border-left: 3px solid var(--success); border-radius: 4px; cursor: pointer;
     }
-    .node:hover { transform: translateY(-1px); box-shadow: 0 5px 14px rgba(23,35,31,.1); }
-    .node:focus-visible { outline: 3px solid rgba(25,116,84,.25); outline-offset: 2px; }
-    .node.is-selected { border-color: var(--green); box-shadow: 0 0 0 3px rgba(25,116,84,.14), 0 5px 14px rgba(23,35,31,.1); }
-    .node.findings, .node.execution_failure { border-left-color: var(--red); }
-    .node.incomplete { border-left-color: var(--amber); }
-    .node.impact { border-left-color: var(--blue); }
-    .node-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
-    .node-type { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; }
-    .node-state { display: flex; align-items: center; gap: 5px; margin-top: 8px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
-    .node-state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
-    .node.findings .node-state::before, .node.execution_failure .node-state::before { background: var(--red); }
-    .node.incomplete .node-state::before { background: var(--amber); }
-    .node.impact .node-state::before { background: var(--blue); }
-    .inspector { min-width: 0; background: var(--paper); overflow: auto; }
-    .inspector-head { min-height: 92px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
-    .eyebrow { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .07em; }
-    .inspector h2 { margin: 6px 0 2px; font-size: 18px; line-height: 1.25; letter-spacing: -.02em; overflow-wrap: anywhere; }
-    .inspector-subtitle { color: var(--muted); font-size: 12px; }
-    .inspector-body { padding: 4px 20px 28px; }
-    .detail-section { padding: 16px 0; border-bottom: 1px solid var(--line); }
+    .node:hover { border-color: #c7ccd0; }
+    .node:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+    .node.is-selected { border-color: var(--brand); background: color-mix(in srgb, var(--brand-tint) 28%, var(--surface)); }
+    .node.findings, .node.execution_failure { border-left-color: var(--danger); }
+    .node.incomplete { border-left-color: var(--highlight); }
+    .node.impact { border-left-color: #8791a0; }
+    .node-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
+    .node-meta { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; }
+    .inspector { min-width: 0; background: var(--surface); overflow: auto; }
+    .inspector-head { padding: 18px 18px 15px; border-bottom: 1px solid var(--border); }
+    .inspector h2 { margin: 0; font-family: Georgia, serif; font-size: 21px; font-weight: 400; letter-spacing: -.015em; overflow-wrap: anywhere; }
+    .inspector-kind { margin-top: 6px; color: var(--muted); font-size: 11px; }
+    .inspector-id { margin-top: 5px; color: var(--muted-soft); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .inspector-body { padding: 0 18px 24px; }
+    .detail-section { padding: 15px 0; border-bottom: 1px solid var(--border-soft); }
     .detail-section:last-child { border-bottom: 0; }
-    .detail-section h3 { margin: 0 0 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+    .detail-section h3 { margin: 0 0 10px; font-family: Georgia, serif; font-size: 14px; font-weight: 400; }
     .detail-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
-    .detail-list li { color: #34413c; font-size: 12px; line-height: 1.45; }
-    .finding { padding: 9px 10px; color: #6f2f27; background: var(--red-soft); border-radius: 5px; }
-    .gap { padding: 9px 10px; color: #6e4a15; background: var(--amber-soft); border-radius: 5px; }
-    .facts { display: grid; grid-template-columns: 1fr auto; gap: 8px 14px; margin: 0; font-size: 12px; }
+    .detail-list li { color: #41474a; font-size: 12px; line-height: 1.45; }
+    .finding { padding-left: 9px; border-left: 2px solid var(--danger); }
+    .gap { padding-left: 9px; border-left: 2px solid var(--highlight); }
+    .facts { display: grid; grid-template-columns: 1fr auto; gap: 0; margin: 0; font-size: 11px; }
+    .facts dt, .facts dd { padding: 5px 0; border-bottom: 1px solid var(--border-soft); }
+    .facts dt:last-of-type, .facts dd:last-of-type { border-bottom: 0; }
     .facts dt { color: var(--muted); }
     .facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
-    .flow { display: grid; grid-template-columns: minmax(0,1fr) 16px minmax(0,1fr); align-items: center; gap: 5px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .flow { display: grid; grid-template-columns: minmax(0,1fr) 14px minmax(0,1fr); align-items: center; gap: 4px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .flow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .flow b { color: var(--muted); text-align: center; font-weight: 400; }
+    .flow b { color: var(--muted-soft); text-align: center; font-weight: 400; }
     .empty { color: var(--muted); font-size: 12px; line-height: 1.5; }
     @media (max-width: 820px) {
-      .overview { align-items: flex-start; }
-      .metrics { gap: 14px; }
       .workspace { grid-template-columns: 1fr; }
       .graph-panel { border-right: 0; }
-      .graph-viewport { min-height: 480px; }
-      .inspector { border-top: 1px solid var(--line); }
+      .graph-viewport { min-height: 460px; }
+      .inspector { border-top: 1px solid var(--border); }
     }
-    @media (max-width: 560px) {
-      .topbar { padding: 0 16px; }
-      .overview { padding: 15px 16px; flex-direction: column; gap: 15px; }
-      .metrics { width: 100%; justify-content: space-between; }
-      .panel-head { padding: 0 16px; }
-      .legend { gap: 9px; }
+    @media (max-width: 520px) {
+      .topbar, .report-head { padding-left: 15px; padding-right: 15px; }
+      .brand-section, .brand-separator { display: none; }
+      .report-head { align-items: flex-start; flex-direction: column; gap: 5px; }
+      .panel-head { padding: 0 14px; }
     }
   </style>
 </head>
 <body>
   <main class="app">
     <header class="topbar">
-      <div class="brand">embrasure</div>
+      <div class="brand">
+        <img src="data:image/png;base64,__EMBRASURE_LOGO__" alt="">
+        <span class="brand-name">Embrasure</span>
+        <span class="brand-separator" aria-hidden="true"></span>
+        <span class="brand-section">Report</span>
+      </div>
       <div class="run-base" id="run-base"></div>
     </header>
-    <section class="overview" aria-labelledby="result-title">
-      <div class="result">
-        <span class="result-mark" id="result-mark" aria-hidden="true"></span>
-        <div>
-          <h1 class="result-title" id="result-title"></h1>
-          <div class="result-copy" id="result-copy"></div>
-        </div>
+    <header class="report-head">
+      <div>
+        <h1 id="report-title"></h1>
+        <p class="report-meta" id="report-meta"></p>
       </div>
-      <div class="metrics" aria-label="Report summary">
-        <div class="metric"><strong id="model-count">0</strong><span>models</span></div>
-        <div class="metric"><strong id="finding-count">0</strong><span>findings</span></div>
-        <div class="metric"><strong id="query-count">0</strong><span>queries</span></div>
-      </div>
-    </section>
+      <div class="report-state" id="report-state"></div>
+    </header>
     <section class="workspace">
       <div class="graph-panel">
         <header class="panel-head">
-          <h2>Lineage impact</h2>
-          <div class="legend" aria-label="Node status">
-            <span><i></i>Passed</span><span><i class="warn"></i>Finding</span><span><i class="scope"></i>Impact only</span>
-          </div>
+          <h2>Lineage</h2>
+          <div class="panel-meta" id="lineage-meta"></div>
         </header>
         <div class="graph-viewport" id="graph-viewport">
           <div class="graph-stage" id="graph-stage">
@@ -156,9 +139,9 @@
       </div>
       <aside class="inspector" aria-live="polite">
         <header class="inspector-head">
-          <div class="eyebrow" id="inspector-eyebrow">Selected node</div>
-          <h2 id="inspector-title">Select a lineage node</h2>
-          <div class="inspector-subtitle" id="inspector-subtitle">Inspect comparison evidence and downstream impact.</div>
+          <h2 id="inspector-title">Select a node</h2>
+          <div class="inspector-kind" id="inspector-kind">Comparison evidence</div>
+          <div class="inspector-id" id="inspector-id"></div>
         </header>
         <div class="inspector-body" id="inspector-body"></div>
       </aside>
@@ -179,10 +162,7 @@
     const addNode = (id, name, type, record = null) => {
       if (!id) return;
       const current = nodeMap.get(id);
-      nodeMap.set(id, {
-        id, name: name || current?.name || id, type: current?.type || type,
-        record: record || current?.record || null
-      });
+      nodeMap.set(id, {id, name: name || current?.name || id, type: current?.type || type, record: record || current?.record || null});
     };
     values(impact.dbt_models).forEach(item => addNode(item.id, item.name, "model"));
     models.forEach(item => addNode(item.unique_id, item.name, "model", item));
@@ -190,14 +170,14 @@
     values(impact.dbt_lineage).forEach(edge => {
       addNode(edge.from, edge.from_name, "model");
       addNode(edge.to, edge.to_name, "model");
-      edges.push({ from: edge.from, to: edge.to });
+      edges.push({from: edge.from, to: edge.to});
     });
     queries.forEach(query => {
       const id = `query:${query.name}`;
       addNode(id, query.name, "query", query);
       values(query.current_refs).forEach(ref => {
         const match = [...nodeMap.values()].find(node => node.id === ref || node.name === ref || node.id.endsWith(`.${ref}`));
-        if (match) edges.push({ from: match.id, to: id });
+        if (match) edges.push({from: match.id, to: id});
       });
     });
 
@@ -207,31 +187,29 @@
     const gapsFor = node => gaps.filter(item => item.scope === node.id || item.scope === node.name || item.scope === `query:${node.name}`);
     const statusFor = node => {
       if (findingsFor(node).length) return "findings";
-      const nodeGaps = gapsFor(node);
-      if (nodeGaps.length) return "incomplete";
+      if (gapsFor(node).length) return "incomplete";
       if (node.type === "query" && ["findings", "incomplete", "execution_failure"].includes(node.record?.status)) return node.record.status;
       const model = modelFor(node);
       if (model?.dbt_build === "failed") return "execution_failure";
       if (model?.comparison || node.type === "query" && node.record?.status === "pass") return "pass";
       return "impact";
     };
-    const statusLabel = status => ({pass: "passed", findings: "finding", incomplete: "incomplete", execution_failure: "failed", impact: "impact only"})[status] || status;
-    const typeLabel = type => ({model: "dbt model", query: "query check", exposure: "dbt exposure", dashboard: "dashboard"})[type] || type;
+    const statusLabel = status => ({pass: "passed", findings: "finding", incomplete: "not validated", execution_failure: "failed", impact: "impact only"})[status] || status;
+    const typeLabel = type => ({model: "dbt model", query: "query check", exposure: "dbt exposure"})[type] || type;
     const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[character]);
     const formatNumber = value => Number(value ?? 0).toLocaleString();
     const formatPercent = value => `${(Number(value ?? 0) * 100).toFixed(1)}%`;
+    const plural = (count, word) => `${formatNumber(count)} ${word}${count === 1 ? "" : "s"}`;
 
-    document.getElementById("run-base").textContent = `compared with ${report.base || "production"}`;
     const overall = report.status || "pass";
-    const mark = document.getElementById("result-mark");
-    mark.className = `result-mark ${overall}`;
-    document.getElementById("result-title").textContent = overall === "pass" ? "Safe to continue" : overall === "findings" ? "Review before merging" : overall === "incomplete" ? "Validation is incomplete" : "Validation failed";
-    document.getElementById("result-copy").textContent = overall === "findings"
-      ? `${findings.length} finding${findings.length === 1 ? "" : "s"} across the affected lineage.`
-      : overall === "pass" ? "No unexpected differences were found." : "Open a node to see what needs attention.";
-    document.getElementById("model-count").textContent = formatNumber(report.summary?.models_compared ?? models.length);
-    document.getElementById("finding-count").textContent = formatNumber(findings.length);
-    document.getElementById("query-count").textContent = formatNumber(queries.length);
+    const compared = report.summary?.models_compared ?? models.length;
+    document.getElementById("run-base").textContent = report.base || "production";
+    document.getElementById("report-title").textContent = findings.length ? plural(findings.length, "finding") : "No findings";
+    document.getElementById("report-meta").textContent = `${plural(compared, "model")} compared · ${plural(queries.length, "query check")} · ${plural(gaps.length, "coverage gap")}`;
+    const reportState = document.getElementById("report-state");
+    reportState.className = `report-state ${overall}`;
+    reportState.textContent = `exit ${report.exit_code ?? 0}`;
+    document.getElementById("lineage-meta").textContent = `${plural(nodes.length, "node")} · ${formatNumber(edges.length)} ${edges.length === 1 ? "dependency" : "dependencies"}`;
 
     const levels = new Map(nodes.map(node => [node.id, 0]));
     const outgoing = new Map(nodes.map(node => [node.id, []]));
@@ -263,18 +241,17 @@
     const maxRows = Math.max(1, ...[...grouped.values()].map(group => group.length));
     const stage = document.getElementById("graph-stage");
     const viewport = document.getElementById("graph-viewport");
-    const stageWidth = Math.max(viewport.clientWidth, 820, 110 + (maxLevel + 1) * 244);
-    const stageHeight = Math.max(viewport.clientHeight, 500, 70 + maxRows * 114);
+    const stageWidth = Math.max(viewport.clientWidth, 760, 92 + (maxLevel + 1) * 220);
+    const stageHeight = Math.max(viewport.clientHeight, 500, 64 + maxRows * 100);
     stage.style.width = `${stageWidth}px`;
     stage.style.height = `${stageHeight}px`;
 
-    let selectedId = null;
     grouped.forEach((group, level) => {
-      const totalHeight = group.length * 114 - 38;
-      const startY = Math.max(35, (stageHeight - totalHeight) / 2);
+      const totalHeight = group.length * 100 - 38;
+      const startY = Math.max(30, (stageHeight - totalHeight) / 2);
       group.forEach((node, row) => {
-        const x = 52 + level * 244;
-        const y = startY + row * 114;
+        const x = 42 + level * 220;
+        const y = startY + row * 100;
         positions.set(node.id, {x, y});
         const button = document.createElement("button");
         const status = statusFor(node);
@@ -287,13 +264,10 @@
         const name = document.createElement("span");
         name.className = "node-name";
         name.textContent = node.name;
-        const type = document.createElement("span");
-        type.className = "node-type";
-        type.textContent = typeLabel(node.type);
-        const state = document.createElement("span");
-        state.className = "node-state";
-        state.textContent = statusLabel(status);
-        button.append(name, type, state);
+        const meta = document.createElement("span");
+        meta.className = "node-meta";
+        meta.textContent = `${typeLabel(node.type)} · ${statusLabel(status)}`;
+        button.append(name, meta);
         button.addEventListener("click", () => selectNode(node.id));
         stage.appendChild(button);
       });
@@ -301,16 +275,16 @@
 
     const edgeSvg = document.getElementById("edges");
     edgeSvg.setAttribute("viewBox", `0 0 ${stageWidth} ${stageHeight}`);
-    edgeSvg.innerHTML = `<defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#aab7b1"></path></marker><marker id="arrow-active" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#197454"></path></marker></defs>`;
+    edgeSvg.innerHTML = `<defs><marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#bdc2c6"></path></marker><marker id="arrow-active" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="oklch(40% .092 254)"></path></marker></defs>`;
     edges.forEach((edge, index) => {
       const from = positions.get(edge.from);
       const to = positions.get(edge.to);
       if (!from || !to) return;
-      const startX = from.x + 190;
-      const startY = from.y + 38;
+      const startX = from.x + 178;
+      const startY = from.y + 31;
       const endX = to.x;
-      const endY = to.y + 38;
-      const curve = Math.max(46, (endX - startX) * .48);
+      const endY = to.y + 31;
+      const curve = Math.max(42, (endX - startX) * .46);
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("d", `M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}`);
       path.setAttribute("class", "edge");
@@ -339,12 +313,12 @@
       const nodeFindings = findingsFor(node);
       const nodeGaps = gapsFor(node);
       const sections = [];
-      if (nodeFindings.length) sections.push(detailSection("What changed", messageList(nodeFindings.map(item => item.message), "finding")));
-      if (nodeGaps.length) sections.push(detailSection("Not validated", messageList(nodeGaps.map(item => item.reason), "gap")));
+      if (nodeFindings.length) sections.push(detailSection("Findings", messageList(nodeFindings.map(item => item.message), "finding")));
+      if (nodeGaps.length) sections.push(detailSection("Coverage", messageList(nodeGaps.map(item => item.reason), "gap")));
 
       if (model?.comparison) {
         const comparison = model.comparison;
-        sections.push(detailSection("Row comparison", factList([
+        sections.push(detailSection("Rows", factList([
           ["Candidate", formatNumber(comparison.ci_row_count)],
           ["Production", formatNumber(comparison.production_row_count)],
           ["Difference", formatPercent(comparison.row_count_relative_change)]
@@ -362,8 +336,7 @@
       } else if (node.type === "query" && node.record) {
         const query = node.record;
         const comparison = query.comparison;
-        sections.push(detailSection("Query check", factList([
-          ["Status", statusLabel(statusFor(node))],
+        sections.push(detailSection("Query", factList([
           ["Primary key", values(query.primary_key).join(", ") || "none"],
           ["Candidate rows", formatNumber(query.candidate_row_count)],
           ["Production rows", formatNumber(query.production_row_count)]
@@ -377,35 +350,33 @@
       }
 
       const flows = columnLineage.filter(edge => edge.from === node.id || edge.to === node.id).slice(0, 8);
-      if (flows.length) sections.push(detailSection("Column lineage", `<div class="detail-list">${flows.map(edge => `<div class="flow"><span title="${escapeHtml(`${edge.from_name}.${edge.from_column}`)}">${escapeHtml(`${edge.from_name}.${edge.from_column}`)}</span><b>→</b><span title="${escapeHtml(`${edge.to_name}.${edge.to_column}`)}">${escapeHtml(`${edge.to_name}.${edge.to_column}`)}</span></div>`).join("")}</div>`));
+      if (flows.length) sections.push(detailSection("Columns", `<div class="detail-list">${flows.map(edge => `<div class="flow"><span title="${escapeHtml(`${edge.from_name}.${edge.from_column}`)}">${escapeHtml(`${edge.from_name}.${edge.from_column}`)}</span><b>→</b><span title="${escapeHtml(`${edge.to_name}.${edge.to_column}`)}">${escapeHtml(`${edge.to_name}.${edge.to_column}`)}</span></div>`).join("")}</div>`));
 
-      sections.push(detailSection("Impact", factList([
-        ["Direct children", formatNumber((outgoing.get(node.id) || []).length)],
-        ["All downstream", formatNumber(reachableCount(node.id))],
-        ["Validation", statusLabel(statusFor(node))]
+      sections.push(detailSection("Downstream", factList([
+        ["Direct", formatNumber((outgoing.get(node.id) || []).length)],
+        ["Total", formatNumber(reachableCount(node.id))]
       ])));
-      return sections.join("") || `<p class="empty">No comparison evidence is available for this node.</p>`;
+      return sections.join("") || `<p class="empty">No comparison evidence is available.</p>`;
     }
 
     function selectNode(id) {
-      selectedId = id;
       const node = nodeMap.get(id);
       document.querySelectorAll(".node").forEach(element => element.classList.toggle("is-selected", element.dataset.nodeId === id));
-      document.querySelectorAll(".edge").forEach((element, index) => {
-        const edge = edges[index];
+      document.querySelectorAll(".edge").forEach(element => {
+        const edge = edges[Number(element.dataset.edgeIndex)];
         const connected = edge && (edge.from === id || edge.to === id);
         element.classList.toggle("is-connected", connected);
         element.setAttribute("marker-end", connected ? "url(#arrow-active)" : "url(#arrow)");
       });
-      document.getElementById("inspector-eyebrow").textContent = `${typeLabel(node.type)} · ${statusLabel(statusFor(node))}`;
       document.getElementById("inspector-title").textContent = node.name;
-      document.getElementById("inspector-subtitle").textContent = node.id;
+      document.getElementById("inspector-kind").textContent = `${typeLabel(node.type)} · ${statusLabel(statusFor(node))}`;
+      document.getElementById("inspector-id").textContent = node.id;
       document.getElementById("inspector-body").innerHTML = inspectorContent(node);
     }
 
     const initial = nodes.find(node => statusFor(node) === "findings") || nodes[0];
     if (initial) selectNode(initial.id);
-    else document.getElementById("inspector-body").innerHTML = `<p class="empty">This report has no lineage nodes.</p>`;
+    else document.getElementById("inspector-body").innerHTML = `<p class="empty">This report has no lineage.</p>`;
   </script>
 </body>
 </html>

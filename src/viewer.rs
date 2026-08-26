@@ -8,7 +8,9 @@ use tokio::{
 };
 
 const TEMPLATE: &str = include_str!("../assets/report-viewer.html");
+const LOGO: &str = include_str!("../assets/embrasure-logo-light.b64");
 const REPORT_PLACEHOLDER: &str = "__EMBRASURE_REPORT__";
+const LOGO_PLACEHOLDER: &str = "__EMBRASURE_LOGO__";
 
 pub async fn run(path: &Path, open_browser: bool) -> Result<()> {
     let report = load(path)?;
@@ -72,7 +74,9 @@ fn render(report: &Value) -> Result<String> {
         .replace('<', "\\u003c")
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029");
-    Ok(TEMPLATE.replacen(REPORT_PLACEHOLDER, &json, 1))
+    Ok(TEMPLATE
+        .replacen(REPORT_PLACEHOLDER, &json, 1)
+        .replacen(LOGO_PLACEHOLDER, LOGO.trim(), 1))
 }
 
 async fn respond(mut stream: TcpStream, page: &[u8]) -> Result<()> {
@@ -115,6 +119,7 @@ mod tests {
 
         assert!(!page.contains("</script><script>alert(1)</script>"));
         assert!(page.contains("\\u003c/script>"));
+        assert!(!page.contains(LOGO_PLACEHOLDER));
     }
 
     #[test]
