@@ -235,30 +235,19 @@
     });
     grouped.forEach(group => group.sort((a, b) => a.name.localeCompare(b.name)));
 
-    const positions = new Map();
+    const nodeElements = new Map();
     const maxLevel = Math.max(0, ...levels.values());
     const maxRows = Math.max(1, ...[...grouped.values()].map(group => group.length));
     const stage = document.getElementById("graph-stage");
     const viewport = document.getElementById("graph-viewport");
-    const stageWidth = Math.max(viewport.clientWidth, 760, 92 + (maxLevel + 1) * 220);
-    const stageHeight = Math.max(viewport.clientHeight, 500, 64 + maxRows * 100);
-    stage.style.width = `${stageWidth}px`;
-    stage.style.height = `${stageHeight}px`;
 
     grouped.forEach((group, level) => {
-      const totalHeight = group.length * 100 - 38;
-      const startY = Math.max(30, (stageHeight - totalHeight) / 2);
       group.forEach((node, row) => {
-        const x = 42 + level * 220;
-        const y = startY + row * 100;
-        positions.set(node.id, {x, y});
         const button = document.createElement("button");
         const status = statusFor(node);
         button.type = "button";
         button.className = `node ${status}`;
         button.dataset.nodeId = node.id;
-        button.style.left = `${x}px`;
-        button.style.top = `${y}px`;
         button.setAttribute("aria-label", `${node.name}, ${typeLabel(node.type)}, ${statusLabel(status)}`);
         const name = document.createElement("span");
         name.className = "node-name";
@@ -269,28 +258,55 @@
         button.append(name, meta);
         button.addEventListener("click", () => selectNode(node.id));
         stage.appendChild(button);
+        nodeElements.set(node.id, button);
       });
     });
 
     const edgeSvg = document.getElementById("edges");
-    edgeSvg.setAttribute("viewBox", `0 0 ${stageWidth} ${stageHeight}`);
     edgeSvg.innerHTML = `<defs><marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#bdc2c6"></path></marker><marker id="arrow-active" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="oklch(40% .092 254)"></path></marker></defs>`;
-    edges.forEach((edge, index) => {
-      const from = positions.get(edge.from);
-      const to = positions.get(edge.to);
-      if (!from || !to) return;
-      const startX = from.x + 178;
-      const startY = from.y + 31;
-      const endX = to.x;
-      const endY = to.y + 31;
-      const curve = Math.max(42, (endX - startX) * .46);
+    const edgePaths = edges.map((_, index) => {
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("d", `M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}`);
       path.setAttribute("class", "edge");
       path.setAttribute("marker-end", "url(#arrow)");
       path.dataset.edgeIndex = String(index);
       edgeSvg.appendChild(path);
+      return path;
     });
+
+    function layoutGraph() {
+      const stageWidth = Math.max(viewport.clientWidth, 760, 92 + (maxLevel + 1) * 220);
+      const stageHeight = Math.max(viewport.clientHeight, 500, 64 + maxRows * 100);
+      const graphWidth = maxLevel * 220 + 178;
+      const startX = Math.max(42, (stageWidth - graphWidth) / 2);
+      stage.style.width = `${stageWidth}px`;
+      stage.style.height = `${stageHeight}px`;
+      edgeSvg.setAttribute("viewBox", `0 0 ${stageWidth} ${stageHeight}`);
+
+      grouped.forEach((group, level) => {
+        const totalHeight = group.length * 100 - 38;
+        const startY = Math.max(30, (stageHeight - totalHeight) / 2);
+        group.forEach((node, row) => {
+          const button = nodeElements.get(node.id);
+          button.style.left = `${startX + level * 220}px`;
+          button.style.top = `${startY + row * 100}px`;
+        });
+      });
+
+      edges.forEach((edge, index) => {
+        const fromElement = nodeElements.get(edge.from);
+        const toElement = nodeElements.get(edge.to);
+        if (!fromElement || !toElement) return;
+        const startX = fromElement.offsetLeft + fromElement.offsetWidth;
+        const startY = fromElement.offsetTop + fromElement.offsetHeight / 2;
+        const endX = toElement.offsetLeft;
+        const endY = toElement.offsetTop + toElement.offsetHeight / 2;
+        const curve = Math.max(42, (endX - startX) * .46);
+        edgePaths[index].setAttribute("d", `M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}`);
+      });
+    }
+
+    layoutGraph();
+    new ResizeObserver(() => requestAnimationFrame(layoutGraph)).observe(viewport);
 
     const reachableCount = start => {
       const seen = new Set();
