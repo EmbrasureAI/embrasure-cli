@@ -1,5 +1,5 @@
 class Embrasure < Formula
-  desc "Validate dbt changes against production Snowflake data"
+  desc "Validate dbt changes against production warehouse data"
   homepage "https://embrasure.ai"
   version "@VERSION@"
   license "Apache-2.0"

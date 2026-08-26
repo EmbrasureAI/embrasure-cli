@@ -17,7 +17,7 @@ $expected = @{
     ProductVersion = $Version
     FileVersion = $Version
     CompanyName = 'Embrasure, Inc.'
-    FileDescription = 'Validate dbt changes against production Snowflake data'
+    FileDescription = 'Validate dbt changes against production warehouse data'
     OriginalFilename = 'embrasure.exe'
     LegalCopyright = 'Copyright 2026 Embrasure, Inc.'
 }

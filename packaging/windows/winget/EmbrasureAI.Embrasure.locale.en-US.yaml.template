@@ -12,7 +12,7 @@ PackageUrl: https://github.com/EmbrasureAI/embrasure-cli
 License: Apache-2.0
 LicenseUrl: https://github.com/EmbrasureAI/embrasure-cli/blob/main/LICENSE
 Copyright: Copyright 2026 Embrasure, Inc.
-ShortDescription: Validate dbt changes against production Snowflake data
+ShortDescription: Validate dbt changes against production warehouse data
 Description: >-
   Embrasure is an open-source CLI that builds changed dbt models in temporary
   Snowflake schemas and compares them with production before a pull request is reviewed.
