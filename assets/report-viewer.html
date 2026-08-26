@@ -34,6 +34,7 @@
     .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
     .brand-logo { display: flex; width: 121px; height: 29px; }
     .brand-logo svg { display: block; width: 100%; height: 100%; }
+    .brand-logo:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
     .brand-separator { width: 1px; height: 16px; margin: 0 2px; background: var(--border); }
     .brand-section { color: var(--muted); font-size: 12px; }
     .run-base { min-width: 0; color: var(--muted-soft); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -114,7 +115,7 @@
   <main class="app">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-logo" role="img" aria-label="Embrasure">__EMBRASURE_LOGO__</span>
+        <a class="brand-logo" href="https://embrasure.ai/" aria-label="Embrasure home">__EMBRASURE_LOGO__</a>
         <span class="brand-separator" aria-hidden="true"></span>
         <span class="brand-section">Report</span>
       </div>
