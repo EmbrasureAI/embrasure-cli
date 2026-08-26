@@ -28,11 +28,11 @@
     .app { min-height: 100%; display: flex; flex-direction: column; }
     .topbar {
       min-height: 54px; display: flex; align-items: center; justify-content: space-between;
-      gap: 24px; padding: 0 22px; color: #f4f6f4; background: #111316;
+      gap: 24px; padding: 0 22px; color: #f7f3eb; background: #0e0c0a;
     }
     .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
-    .brand img { width: 30px; height: 30px; object-fit: contain; }
-    .brand-name { font-family: Georgia, serif; font-size: 17px; letter-spacing: -.015em; }
+    .brand-logo { display: flex; width: 121px; height: 29px; }
+    .brand-logo svg { display: block; width: 100%; height: 100%; }
     .brand-separator { width: 1px; height: 16px; margin: 0 2px; background: #45494d; }
     .brand-section { color: #aeb2b5; font-size: 12px; }
     .run-base { min-width: 0; color: #9ea3a6; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -111,8 +111,7 @@
   <main class="app">
     <header class="topbar">
       <div class="brand">
-        <img src="data:image/png;base64,__EMBRASURE_LOGO__" alt="">
-        <span class="brand-name">Embrasure</span>
+        <span class="brand-logo" role="img" aria-label="Embrasure">__EMBRASURE_LOGO__</span>
         <span class="brand-separator" aria-hidden="true"></span>
         <span class="brand-section">Report</span>
       </div>

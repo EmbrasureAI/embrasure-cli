@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const TEMPLATE: &str = include_str!("../assets/report-viewer.html");
-const LOGO: &str = include_str!("../assets/embrasure-logo-light.b64");
+const LOGO: &str = include_str!("../assets/embrasure-lockup-ivory.svg");
 const REPORT_PLACEHOLDER: &str = "__EMBRASURE_REPORT__";
 const LOGO_PLACEHOLDER: &str = "__EMBRASURE_LOGO__";
 
