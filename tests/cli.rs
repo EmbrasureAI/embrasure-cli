@@ -11,8 +11,42 @@ fn help_exposes_enterprise_setup_commands() {
         .success()
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("check"))
+        .stdout(predicate::str::contains("view"))
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("auth"));
+}
+
+#[test]
+fn view_rejects_reports_before_version_four() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("report.json");
+    fs::write(&report, r#"{"schema_version":3}"#).unwrap();
+
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .args(["view", "--no-open"])
+        .arg(report)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("requires report version 4"));
+}
+
+#[test]
+fn visual_example_matches_the_v4_report_contract() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join("schemas/report-v4.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let report: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join("examples/visual-report.json")).unwrap(),
+    )
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+
+    if let Err(error) = validator.validate(&report) {
+        panic!("visual report example violates the v4 schema: {error}");
+    }
 }
 
 #[test]

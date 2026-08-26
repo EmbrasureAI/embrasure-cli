@@ -1,0 +1,255 @@
+{
+  "schema_version": 4,
+  "status": "findings",
+  "exit_code": 1,
+  "base": "origin/main",
+  "ci_schemas": [
+    {
+      "account": "primary",
+      "database": "ANALYTICS",
+      "schema": "EMBRASURE_PR_142_8F2A",
+      "cleaned_up": true
+    }
+  ],
+  "thresholds": {
+    "row_count_relative": 0.01,
+    "null_rate_absolute": 0.01,
+    "cardinality_relative": 0.05,
+    "numeric_relative": 0.05
+  },
+  "summary": {
+    "models_selected": 5,
+    "models_built": 5,
+    "models_compared": 5,
+    "query_checks_configured": 1,
+    "query_checks_run": 1,
+    "query_checks_passed": 0,
+    "findings": 4,
+    "coverage_gaps": 1
+  },
+  "validation_scope": {
+    "downstream": "all",
+    "impacted_models": 6,
+    "requested_models": 5,
+    "validated_models": [
+      "model.jaffle_shop.stg_orders",
+      "model.jaffle_shop.orders",
+      "model.jaffle_shop.fct_orders",
+      "model.jaffle_shop.daily_revenue",
+      "model.jaffle_shop.customer_ltv"
+    ],
+    "skipped_models": [
+      {
+        "id": "model.jaffle_shop.finance_forecast",
+        "reason": "impact reported, but the model was outside this validation selection"
+      }
+    ]
+  },
+  "models": [
+    {
+      "unique_id": "model.jaffle_shop.stg_orders",
+      "name": "stg_orders",
+      "account": "primary",
+      "ci_relation": "ANALYTICS.EMBRASURE_PR_142_8F2A.stg_orders",
+      "production_relation": "ANALYTICS.PROD.stg_orders",
+      "dbt_build": "passed",
+      "build_strategy": "standard",
+      "comparison": {
+        "ci_row_count": 100000,
+        "production_row_count": 100000,
+        "row_count_relative_change": 0.0,
+        "columns": [],
+        "primary_key": null
+      }
+    },
+    {
+      "unique_id": "model.jaffle_shop.orders",
+      "name": "orders",
+      "account": "primary",
+      "ci_relation": "ANALYTICS.EMBRASURE_PR_142_8F2A.orders",
+      "production_relation": "ANALYTICS.PROD.orders",
+      "dbt_build": "passed",
+      "build_strategy": "standard",
+      "comparison": {
+        "ci_row_count": 99410,
+        "production_row_count": 98000,
+        "row_count_relative_change": 0.0144,
+        "columns": [
+          {
+            "name": "amount",
+            "ci_type": "DECIMAL(18,2)",
+            "production_type": "DECIMAL(18,2)",
+            "ci": {"null_count": 590, "null_rate": 0.0059, "cardinality": 3210, "average": 84.61},
+            "production": {"null_count": 0, "null_rate": 0.0, "cardinality": 3198, "average": 72.44}
+          }
+        ],
+        "primary_key": {
+          "columns": ["order_id"],
+          "ci_only_count": 1410,
+          "production_only_count": 0,
+          "ci_only_examples": [["990021"], ["990022"]],
+          "production_only_examples": [],
+          "ci_duplicate_key_count": 23,
+          "production_duplicate_key_count": 0,
+          "ci_duplicate_rows": 46,
+          "production_duplicate_rows": 0,
+          "ci_null_key_rows": 0,
+          "production_null_key_rows": 0,
+          "ci_duplicate_examples": [["584103"], ["584220"]]
+        }
+      }
+    },
+    {
+      "unique_id": "model.jaffle_shop.fct_orders",
+      "name": "fct_orders",
+      "account": "primary",
+      "ci_relation": "ANALYTICS.EMBRASURE_PR_142_8F2A.fct_orders",
+      "production_relation": "ANALYTICS.PROD.fct_orders",
+      "dbt_build": "passed",
+      "build_strategy": "standard",
+      "comparison": {
+        "ci_row_count": 99410,
+        "production_row_count": 98000,
+        "row_count_relative_change": 0.0144,
+        "columns": [
+          {
+            "name": "gross_amount",
+            "ci_type": "DECIMAL(18,2)",
+            "production_type": "DECIMAL(18,2)",
+            "ci": {"null_count": 590, "null_rate": 0.0059, "cardinality": 3210, "average": 84.61, "p05": 8.0, "p50": 61.0, "p95": 240.0},
+            "production": {"null_count": 0, "null_rate": 0.0, "cardinality": 3198, "average": 72.44, "p05": 8.0, "p50": 59.0, "p95": 201.0}
+          }
+        ],
+        "primary_key": null
+      }
+    },
+    {
+      "unique_id": "model.jaffle_shop.daily_revenue",
+      "name": "daily_revenue",
+      "account": "primary",
+      "ci_relation": "ANALYTICS.EMBRASURE_PR_142_8F2A.daily_revenue",
+      "production_relation": "ANALYTICS.PROD.daily_revenue",
+      "dbt_build": "passed",
+      "build_strategy": "standard",
+      "comparison": {
+        "ci_row_count": 365,
+        "production_row_count": 365,
+        "row_count_relative_change": 0.0,
+        "columns": [],
+        "primary_key": null
+      }
+    },
+    {
+      "unique_id": "model.jaffle_shop.customer_ltv",
+      "name": "customer_ltv",
+      "account": "primary",
+      "ci_relation": "ANALYTICS.EMBRASURE_PR_142_8F2A.customer_ltv",
+      "production_relation": "ANALYTICS.PROD.customer_ltv",
+      "dbt_build": "passed",
+      "build_strategy": "standard",
+      "comparison": {
+        "ci_row_count": 15204,
+        "production_row_count": 15198,
+        "row_count_relative_change": 0.0004,
+        "columns": [],
+        "primary_key": null
+      }
+    }
+  ],
+  "query_checks": [
+    {
+      "name": "paid order totals",
+      "account": "primary",
+      "status": "findings",
+      "current_refs": ["fct_orders"],
+      "production_refs": ["fct_orders"],
+      "primary_key": ["customer_id"],
+      "candidate_relation": "ANALYTICS.EMBRASURE_PR_142_8F2A.__query_paid_order_totals",
+      "production_relation": "ANALYTICS.PROD.__query_paid_order_totals",
+      "candidate_row_count": 15198,
+      "production_row_count": 15198,
+      "columns": [
+        {"name": "customer_id", "candidate_type": "BIGINT", "production_type": "BIGINT"},
+        {"name": "paid_amount", "candidate_type": "DECIMAL(38,2)", "production_type": "DECIMAL(38,2)"}
+      ],
+      "comparison": {
+        "candidate_only_rows": 0,
+        "production_only_rows": 0,
+        "changed_rows": 127,
+        "candidate_duplicate_keys": 0,
+        "production_duplicate_keys": 0,
+        "candidate_duplicate_rows": 0,
+        "production_duplicate_rows": 0,
+        "candidate_null_key_rows": 0,
+        "production_null_key_rows": 0,
+        "column_mismatches": [{"column": "paid_amount", "rows": 127}],
+        "examples": [
+          {
+            "key": ["218"],
+            "candidate": ["218", "884.52"],
+            "production": ["218", "742.11"],
+            "candidate_multiplicity": null,
+            "production_multiplicity": null
+          }
+        ]
+      },
+      "reason": null,
+      "invalid_primary_key_reason": null,
+      "examples_truncated": false
+    }
+  ],
+  "impact": {
+    "dbt_models": [
+      {"id": "model.jaffle_shop.stg_orders", "name": "stg_orders"},
+      {"id": "model.jaffle_shop.orders", "name": "orders"},
+      {"id": "model.jaffle_shop.fct_orders", "name": "fct_orders"},
+      {"id": "model.jaffle_shop.daily_revenue", "name": "daily_revenue"},
+      {"id": "model.jaffle_shop.customer_ltv", "name": "customer_ltv"},
+      {"id": "model.jaffle_shop.finance_forecast", "name": "finance_forecast"}
+    ],
+    "dbt_exposures": [
+      {"id": "exposure.jaffle_shop.executive_revenue", "name": "executive_revenue"}
+    ],
+    "dbt_lineage": [
+      {"from": "model.jaffle_shop.stg_orders", "from_name": "stg_orders", "to": "model.jaffle_shop.orders", "to_name": "orders"},
+      {"from": "model.jaffle_shop.orders", "from_name": "orders", "to": "model.jaffle_shop.fct_orders", "to_name": "fct_orders"},
+      {"from": "model.jaffle_shop.fct_orders", "from_name": "fct_orders", "to": "model.jaffle_shop.daily_revenue", "to_name": "daily_revenue"},
+      {"from": "model.jaffle_shop.fct_orders", "from_name": "fct_orders", "to": "model.jaffle_shop.customer_ltv", "to_name": "customer_ltv"},
+      {"from": "model.jaffle_shop.daily_revenue", "from_name": "daily_revenue", "to": "model.jaffle_shop.finance_forecast", "to_name": "finance_forecast"},
+      {"from": "model.jaffle_shop.daily_revenue", "from_name": "daily_revenue", "to": "exposure.jaffle_shop.executive_revenue", "to_name": "executive_revenue"}
+    ],
+    "dbt_lineage_changes": [
+      {
+        "change": "added",
+        "edge": {"from": "model.jaffle_shop.daily_revenue", "from_name": "daily_revenue", "to": "model.jaffle_shop.finance_forecast", "to_name": "finance_forecast"}
+      }
+    ],
+    "column_lineage": [
+      {"account": "primary", "from": "model.jaffle_shop.stg_orders", "from_name": "stg_orders", "from_column": "order_id", "to": "model.jaffle_shop.orders", "to_name": "orders", "to_column": "order_id"},
+      {"account": "primary", "from": "model.jaffle_shop.stg_orders", "from_name": "stg_orders", "from_column": "amount", "to": "model.jaffle_shop.orders", "to_name": "orders", "to_column": "amount"},
+      {"account": "primary", "from": "model.jaffle_shop.orders", "from_name": "orders", "from_column": "order_id", "to": "model.jaffle_shop.fct_orders", "to_name": "fct_orders", "to_column": "order_id"},
+      {"account": "primary", "from": "model.jaffle_shop.orders", "from_name": "orders", "from_column": "amount", "to": "model.jaffle_shop.fct_orders", "to_name": "fct_orders", "to_column": "gross_amount"},
+      {"account": "primary", "from": "model.jaffle_shop.fct_orders", "from_name": "fct_orders", "from_column": "gross_amount", "to": "model.jaffle_shop.daily_revenue", "to_name": "daily_revenue", "to_column": "revenue"},
+      {"account": "primary", "from": "model.jaffle_shop.fct_orders", "from_name": "fct_orders", "from_column": "customer_id", "to": "model.jaffle_shop.customer_ltv", "to_name": "customer_ltv", "to_column": "customer_id"},
+      {"account": "primary", "from": "model.jaffle_shop.fct_orders", "from_name": "fct_orders", "from_column": "gross_amount", "to": "model.jaffle_shop.customer_ltv", "to_name": "customer_ltv", "to_column": "lifetime_value"}
+    ],
+    "column_lineage_gaps": [],
+    "metabase_dashboards": [
+      {"id": "metabase:dashboard:18", "name": "Revenue overview", "url": "https://metabase.example.com/dashboard/18"}
+    ],
+    "cross_account_dependencies": []
+  },
+  "findings": [
+    {"model": "model.jaffle_shop.orders", "check": "row_count", "message": "row count increased 1.4% (98,000 → 99,410), above the 1.0% threshold"},
+    {"model": "model.jaffle_shop.orders", "check": "primary_key", "message": "23 duplicate order_id values were introduced in the candidate"},
+    {"model": "model.jaffle_shop.fct_orders", "check": "numeric_average", "message": "gross_amount average changed 16.8% (72.44 → 84.61)"},
+    {"model": "query:paid order totals", "check": "query_diff", "message": "127 customer totals changed; paid_amount differs for every changed row"}
+  ],
+  "coverage_gaps": [
+    {"scope": "model.jaffle_shop.finance_forecast", "check": "model_comparison", "reason": "impact reported, but this downstream model was not selected for validation"}
+  ],
+  "notices": [
+    {"scope": "model.jaffle_shop.daily_revenue", "code": "lineage_added", "message": "finance_forecast is a new downstream dependency"}
+  ],
+  "execution_errors": []
+}

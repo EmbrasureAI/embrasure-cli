@@ -20,6 +20,7 @@ mod run;
 mod snowflake;
 mod style;
 mod update;
+mod viewer;
 
 use std::{io::IsTerminal, path::PathBuf, process::ExitCode, time::Instant};
 
@@ -168,6 +169,15 @@ enum Command {
         /// Read additional business intent from a UTF-8 file.
         #[arg(long, value_name = "PATH", requires = "cloud")]
         context_file: Option<PathBuf>,
+    },
+    /// Open a version 4 JSON report as an interactive lineage view.
+    View {
+        /// Report created by `embrasure check --json`.
+        #[arg(value_name = "REPORT")]
+        report: PathBuf,
+        /// Serve the report without opening the default browser.
+        #[arg(long)]
+        no_open: bool,
     },
     /// Check local tools, credentials, warehouse permissions, optional Metabase access, and available updates.
     Doctor {
@@ -479,6 +489,10 @@ async fn main() -> ExitCode {
                 ExitCode::from(report.exit_code)
             }
         }
+        Command::View { report, no_open } => match viewer::run(&report, !no_open).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Doctor { read_only, json } => {
             let report = doctor::run(&config, !read_only).await;
             if json {
