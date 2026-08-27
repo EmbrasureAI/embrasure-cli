@@ -70,8 +70,14 @@
     .node:hover { border-color: color-mix(in oklch, var(--brand) 70%, var(--border)); }
     .node:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
     .node.is-selected { border-color: var(--brand); background: color-mix(in srgb, var(--brand-tint) 28%, var(--surface)); }
-    .node.findings, .node.execution_failure { border-left-color: var(--danger); }
-    .node.incomplete { border-left-color: var(--highlight); }
+    .node.findings, .node.execution_failure {
+      border-left-color: var(--danger);
+      background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+    }
+    .node.incomplete {
+      border-left-color: var(--highlight);
+      background: color-mix(in oklch, var(--highlight) 7%, var(--surface));
+    }
     .node.impact { border-left-color: var(--muted-soft); }
     .node-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
     .node-meta { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; }
@@ -197,7 +203,7 @@
       if (model?.comparison || node.type === "query" && node.record?.status === "pass") return "pass";
       return "impact";
     };
-    const statusLabel = status => ({pass: "passed", findings: "finding", incomplete: "not validated", execution_failure: "failed", impact: "impact only"})[status] || status;
+    const statusLabel = status => ({pass: "passed", findings: "issue detected", incomplete: "not validated", execution_failure: "run failed", impact: "downstream impact"})[status] || status;
     const typeLabel = type => ({model: "dbt model", query: "query check", exposure: "dbt exposure"})[type] || type;
     const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[character]);
     const formatNumber = value => Number(value ?? 0).toLocaleString();
@@ -207,11 +213,12 @@
     const overall = report.status || "pass";
     const compared = report.summary?.models_compared ?? models.length;
     document.getElementById("run-base").textContent = report.base || "production";
-    document.getElementById("report-title").textContent = findings.length ? plural(findings.length, "finding") : "No findings";
+    document.getElementById("report-title").textContent = findings.length ? `${plural(findings.length, "issue")} detected` : "No issues detected";
     document.getElementById("report-meta").textContent = `${plural(compared, "model")} compared · ${plural(queries.length, "query check")} · ${plural(gaps.length, "coverage gap")}`;
     const reportState = document.getElementById("report-state");
     reportState.className = `report-state ${overall}`;
-    reportState.textContent = `exit ${report.exit_code ?? 0}`;
+    const reportStateLabel = ({pass: "passed", findings: "issues detected", incomplete: "incomplete", execution_failure: "run failed"})[overall] || overall;
+    reportState.textContent = `${reportStateLabel} · exit ${report.exit_code ?? 0}`;
     document.getElementById("lineage-meta").textContent = `${plural(nodes.length, "node")} · ${formatNumber(edges.length)} ${edges.length === 1 ? "dependency" : "dependencies"}`;
 
     const levels = new Map(nodes.map(node => [node.id, 0]));
@@ -332,7 +339,7 @@
       const nodeFindings = findingsFor(node);
       const nodeGaps = gapsFor(node);
       const sections = [];
-      if (nodeFindings.length) sections.push(detailSection("Findings", messageList(nodeFindings.map(item => item.message), "finding")));
+      if (nodeFindings.length) sections.push(detailSection("Issues detected", messageList(nodeFindings.map(item => item.message), "finding")));
       if (nodeGaps.length) sections.push(detailSection("Coverage", messageList(nodeGaps.map(item => item.reason), "gap")));
 
       if (model?.comparison) {
