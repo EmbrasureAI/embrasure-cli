@@ -13,6 +13,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
+use globset::Glob;
 use keyring::Entry;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -221,20 +222,34 @@ pub fn prepare_snapshot(
     let mut candidates = changed_paths(&repository_root, base_ref)?;
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
     candidates.dedup_by(|a, b| a.0 == b.0);
+    let external_matchers = config
+        .external_changes
+        .iter()
+        .map(|mapping| {
+            Glob::new(&mapping.path)
+                .with_context(|| format!("invalid external change glob {}", mapping.path))
+                .map(|glob| glob.compile_matcher())
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let mut files = Vec::new();
     let mut total_bytes = 0;
     for (repo_path, status) in candidates {
         let relative = Path::new(&repo_path);
+        let normalized = normalize_snapshot_path(relative)?;
         let project_path = if dbt_root.is_empty() {
-            relative
-        } else if let Ok(path) = relative.strip_prefix(&dbt_root) {
-            path
+            Some(relative)
         } else {
-            continue;
+            relative.strip_prefix(&dbt_root).ok()
         };
-        let normalized = normalize_snapshot_path(project_path)?;
-        if !eligible(&normalized) {
+        let eligible_project_file = project_path
+            .map(normalize_snapshot_path)
+            .transpose()?
+            .is_some_and(|path| eligible(&path));
+        let configured_external_file = external_matchers
+            .iter()
+            .any(|matcher| matcher.is_match(&normalized));
+        if excluded(&normalized) || (!eligible_project_file && !configured_external_file) {
             continue;
         }
         let absolute = repository_root.join(relative);
@@ -322,19 +337,14 @@ pub fn prepare_snapshot(
         incremental_mode: options.incremental_mode,
         select: options.select.clone(),
     };
-    let fingerprint = hex_digest(
-        format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{:?}",
-            repository_root.display(),
-            dbt_root,
-            base_sha,
-            snapshot_hash,
-            env!("CARGO_PKG_VERSION"),
-            hex_digest(&config_bytes),
-            options,
-        )
-        .as_bytes(),
-    );
+    let fingerprint = snapshot_fingerprint(
+        &repository_root,
+        &dbt_root,
+        &base_sha,
+        &snapshot_hash,
+        &validation_config,
+        &validation_options,
+    )?;
     Ok(PreparedSnapshot {
         dbt_root,
         owner,
@@ -898,6 +908,16 @@ fn normalize_snapshot_path(path: &Path) -> Result<String> {
 }
 
 fn eligible(path: &str) -> bool {
+    if excluded(path) {
+        return false;
+    }
+    let lower = path.to_ascii_lowercase();
+    [".sql", ".yml", ".yaml", ".py", ".json", ".md", ".csv"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+}
+
+fn excluded(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let parts = lower.split('/').collect::<Vec<_>>();
     if parts.iter().any(|part| {
@@ -918,11 +938,9 @@ fn eligible(path: &str) -> bool {
             )
         })
     {
-        return false;
+        return true;
     }
-    [".sql", ".yml", ".yaml", ".py", ".json", ".md", ".csv"]
-        .iter()
-        .any(|suffix| lower.ends_with(suffix))
+    false
 }
 
 fn contains_secret(value: &str) -> bool {
@@ -945,6 +963,33 @@ fn contains_secret(value: &str) -> bool {
 
 fn hex_digest(bytes: &[u8]) -> String {
     encode_hex(&Sha256::digest(bytes))
+}
+
+fn snapshot_fingerprint(
+    repository_root: &Path,
+    dbt_root: &str,
+    base_sha: &str,
+    snapshot_hash: &str,
+    validation_config: &ValidationConfigSnapshot,
+    validation_options: &ValidationOptionsSnapshot,
+) -> Result<String> {
+    let config = serde_json::to_vec(validation_config)?;
+    let options = serde_json::to_vec(validation_options)?;
+    let parts = [
+        repository_root.to_string_lossy().as_bytes().to_vec(),
+        dbt_root.as_bytes().to_vec(),
+        base_sha.as_bytes().to_vec(),
+        snapshot_hash.as_bytes().to_vec(),
+        env!("CARGO_PKG_VERSION").as_bytes().to_vec(),
+        config,
+        options,
+    ];
+    let mut fingerprint = Sha256::new();
+    for part in parts {
+        fingerprint.update((part.len() as u64).to_be_bytes());
+        fingerprint.update(part);
+    }
+    Ok(encode_hex(&fingerprint.finalize()))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -1089,6 +1134,139 @@ mod tests {
     #[test]
     fn seed_files_are_eligible_for_the_exact_cloud_snapshot() {
         assert!(eligible("seeds/orders.csv"));
+    }
+
+    #[test]
+    fn snapshot_fingerprint_uses_only_the_serialized_cloud_contract() {
+        let repository = Path::new("/tmp/example-repository");
+        let options = ValidationOptionsSnapshot {
+            mode: Some(ComparisonMode::Quick),
+            downstream: Some(DownstreamPolicy::All),
+            critical_tags: Some(vec!["finance".into()]),
+            incremental_mode: Some(IncrementalMode::FullRefresh),
+            select: vec!["orders".into()],
+        };
+        let first_config = ValidationConfigSnapshot {
+            sha256: "a".repeat(64),
+            content_utf8: "version: 2\n".into(),
+            repository_path: Some("embrasure-check.yml".into()),
+        };
+        let moved_config = ValidationConfigSnapshot {
+            repository_path: Some("config/embrasure-check.yml".into()),
+            ..first_config.clone()
+        };
+        let first = snapshot_fingerprint(
+            repository,
+            "analytics",
+            &"b".repeat(40),
+            &"c".repeat(64),
+            &first_config,
+            &options,
+        )
+        .unwrap();
+        let repeated = snapshot_fingerprint(
+            repository,
+            "analytics",
+            &"b".repeat(40),
+            &"c".repeat(64),
+            &first_config,
+            &options,
+        )
+        .unwrap();
+        let moved = snapshot_fingerprint(
+            repository,
+            "analytics",
+            &"b".repeat(40),
+            &"c".repeat(64),
+            &moved_config,
+            &options,
+        )
+        .unwrap();
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, moved);
+    }
+
+    #[test]
+    fn snapshot_includes_configured_external_changes_with_repository_paths() {
+        fn run_git(root: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "--quiet"]);
+        run_git(repo.path(), &["config", "user.name", "Embrasure Test"]);
+        run_git(repo.path(), &["config", "user.email", "test@embrasure.ai"]);
+        run_git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/EmbrasureAI/demo.git",
+            ],
+        );
+        fs::create_dir_all(repo.path().join("analytics/models")).unwrap();
+        fs::create_dir_all(repo.path().join("shared")).unwrap();
+        fs::write(
+            repo.path().join("analytics/models/orders.sql"),
+            "select 1\n",
+        )
+        .unwrap();
+        fs::write(repo.path().join("shared/metrics.lock"), "one\n").unwrap();
+        let config_path = repo.path().join("embrasure-check.yml");
+        fs::write(
+            &config_path,
+            r#"
+version: 1
+dbt: { project_dir: analytics }
+accounts:
+  - name: primary
+    account: org-account
+    user: ci
+    role: ci
+    database: analytics
+    warehouse: ci
+    production_schema: prod
+    auth: { type: oauth, token_env: TOKEN }
+external_changes:
+  - path: shared/*.lock
+    models: [orders]
+"#,
+        )
+        .unwrap();
+        run_git(repo.path(), &["add", "."]);
+        run_git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+        fs::write(
+            repo.path().join("analytics/models/orders.sql"),
+            "select 2\n",
+        )
+        .unwrap();
+        fs::write(repo.path().join("shared/metrics.lock"), "two\n").unwrap();
+
+        let mut config = Config::load(&config_path).unwrap();
+        config.resolve_from(&config_path).unwrap();
+        let snapshot =
+            prepare_snapshot(&config_path, &config, "HEAD", &CheckOptions::default()).unwrap();
+        let paths = snapshot
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            paths,
+            vec!["analytics/models/orders.sql", "shared/metrics.lock"]
+        );
     }
 
     #[test]
