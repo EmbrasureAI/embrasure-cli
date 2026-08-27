@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{DatabricksResolvedAuth, ResolvedAuth, SnowflakeResolvedAuth},
-    config::{AccountConfig, Config, ProviderConfig},
+    config::{AccountConfig, AuthConfig, Config, DatabricksAuthConfig, ProviderConfig},
     git, provider,
     report::{ImpactReport, ImpactedAsset, LineageChange, LineageChangeKind, LineageEdge},
 };
@@ -1195,9 +1195,37 @@ fn dbt_process(config: &Config, project: &Path, profiles: &Path, args: &[&str]) 
         .arg("--profile")
         .arg(&config.dbt.profile)
         .current_dir(project);
+    for variable in warehouse_auth_env_vars(config) {
+        command.env_remove(variable);
+    }
     command
         .output()
         .with_context(|| format!("could not run {}", config.dbt.command))
+}
+
+fn warehouse_auth_env_vars(config: &Config) -> BTreeSet<&str> {
+    let mut variables = BTreeSet::new();
+    for account in &config.accounts {
+        match &account.provider {
+            ProviderConfig::Snowflake(snowflake) => match &snowflake.auth {
+                AuthConfig::OauthLocal => {}
+                AuthConfig::Oauth { token_env }
+                | AuthConfig::ProgrammaticAccessToken { token_env } => {
+                    variables.insert(token_env.as_str());
+                }
+                AuthConfig::KeyPair { passphrase_env, .. } => {
+                    if let Some(variable) = passphrase_env {
+                        variables.insert(variable.as_str());
+                    }
+                }
+            },
+            ProviderConfig::Databricks(databricks) => {
+                let DatabricksAuthConfig::Token { token_env } = &databricks.auth;
+                variables.insert(token_env.as_str());
+            }
+        }
+    }
+    variables
 }
 
 fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
@@ -1594,6 +1622,49 @@ accounts:
         let profile = fs::read_to_string(dir.path().join("profiles.yml")).unwrap();
         assert!(profile.contains("password: secret-pat"));
         assert!(!profile.contains("authenticator:"));
+    }
+
+    #[test]
+    fn dbt_children_do_not_inherit_warehouse_secret_environment_names() {
+        let snowflake: Config = serde_yaml::from_str(
+            r#"
+version: 1
+accounts:
+  - name: primary
+    account: org-account
+    user: DBT_CI
+    role: TRANSFORMER
+    database: ANALYTICS
+    warehouse: COMPUTE_WH
+    production_schema: PROD
+    auth: { type: programmatic_access_token, token_env: CLOUD_PAT }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            warehouse_auth_env_vars(&snowflake),
+            BTreeSet::from(["CLOUD_PAT"])
+        );
+
+        let databricks: Config = serde_yaml::from_str(
+            r#"
+version: 2
+accounts:
+  - name: primary
+    provider:
+      type: databricks
+      host: https://example.cloud.databricks.com
+      http_path: /sql/1.0/warehouses/abc
+      catalog: analytics
+      production_schema: prod
+      auth: { type: token, token_env: CLOUD_DATABRICKS_TOKEN }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            warehouse_auth_env_vars(&databricks),
+            BTreeSet::from(["CLOUD_DATABRICKS_TOKEN"])
+        );
     }
 
     #[test]

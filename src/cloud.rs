@@ -21,7 +21,13 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use url::Url;
 
-use crate::{config::Config, git, loopback, report::Report, run::CheckOptions, style, update};
+use crate::{
+    config::{ComparisonMode, Config, DownstreamPolicy, IncrementalMode},
+    git, loopback,
+    report::Report,
+    run::CheckOptions,
+    style, update,
+};
 
 const KEYCHAIN_SERVICE: &str = "ai.embrasure.cli.cloud";
 const KEYCHAIN_ACCOUNT: &str = "session";
@@ -65,6 +71,23 @@ struct ChangedFile {
     content_utf8: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ValidationConfigSnapshot {
+    sha256: String,
+    content_utf8: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ValidationOptionsSnapshot {
+    mode: Option<ComparisonMode>,
+    downstream: Option<DownstreamPolicy>,
+    critical_tags: Option<Vec<String>>,
+    incremental_mode: Option<IncrementalMode>,
+    select: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PreparedSnapshot {
     dbt_root: String,
@@ -75,6 +98,8 @@ pub struct PreparedSnapshot {
     snapshot_hash: String,
     fingerprint: String,
     files: Vec<ChangedFile>,
+    validation_config: ValidationConfigSnapshot,
+    validation_options: ValidationOptionsSnapshot,
     total_bytes: usize,
 }
 
@@ -263,7 +288,40 @@ pub fn prepare_snapshot(
         manifest.update(b"\n");
     }
     let snapshot_hash = encode_hex(&manifest.finalize());
-    let config_bytes = fs::read(config_path).unwrap_or_default();
+    let canonical_config_path = config_path.canonicalize().with_context(|| {
+        format!(
+            "could not resolve validation config {}",
+            config_path.display()
+        )
+    })?;
+    let config_bytes = fs::read(&canonical_config_path)
+        .with_context(|| format!("could not read validation config {}", config_path.display()))?;
+    if config_bytes.len() > MAX_FILE_BYTES {
+        bail!("validation config exceeds the 256 KB upload limit");
+    }
+    let config_content =
+        String::from_utf8(config_bytes.clone()).context("validation config is not UTF-8 text")?;
+    if contains_secret(&config_content) {
+        bail!(
+            "validation config appears to contain a secret; use environment-variable references instead"
+        );
+    }
+    let validation_config = ValidationConfigSnapshot {
+        sha256: hex_digest(&config_bytes),
+        content_utf8: config_content,
+        repository_path: canonical_config_path
+            .strip_prefix(&repository_root)
+            .ok()
+            .map(normalize_snapshot_path)
+            .transpose()?,
+    };
+    let validation_options = ValidationOptionsSnapshot {
+        mode: options.mode,
+        downstream: options.downstream,
+        critical_tags: options.critical_tags.clone(),
+        incremental_mode: options.incremental_mode,
+        select: options.select.clone(),
+    };
     let fingerprint = hex_digest(
         format!(
             "{}\0{}\0{}\0{}\0{}\0{}\0{:?}",
@@ -286,6 +344,8 @@ pub fn prepare_snapshot(
         snapshot_hash,
         fingerprint,
         files,
+        validation_config,
+        validation_options,
         total_bytes,
     })
 }
@@ -327,7 +387,7 @@ fn cache_is_reusable(
 ) -> bool {
     cached_fingerprint == snapshot_fingerprint
         && cache_is_fresh(saved_at)
-        && report_schema_version == 3
+        && report_schema_version == 4
 }
 
 pub fn save_review(snapshot: &PreparedSnapshot, report: &Report) -> Result<()> {
@@ -379,6 +439,8 @@ fn handoff_payload(
         "intent_context": intent,
         "changed_files": snapshot.files,
         "local_review": report,
+        "validation_config": snapshot.validation_config,
+        "validation_options": snapshot.validation_options,
         "cli": {"version": env!("CARGO_PKG_VERSION"), "platform": env::consts::OS},
         "notify_slack": true,
     })
@@ -731,8 +793,6 @@ fn git_path(cwd: &Path, args: &[&str]) -> Result<PathBuf> {
 }
 
 fn changed_paths(root: &Path, base: &str) -> Result<Vec<(String, String)>> {
-    // Cloud snapshots intentionally follow tracked Git diff output only.
-    // Follow-up: decide whether cloud handoffs should include untracked files.
     let output = git::output(root, &["diff", "--name-status", "-z", base, "--"])?;
     if !output.status.success() {
         bail!(
@@ -749,15 +809,33 @@ fn changed_paths(root: &Path, base: &str) -> Result<Vec<(String, String)>> {
     let mut index = 0;
     while index + 1 < parts.len() {
         let code = String::from_utf8_lossy(parts[index]);
-        let status = match code.chars().next().unwrap_or('M') {
-            'A' => "added",
-            'D' => "deleted",
-            _ => "modified",
-        };
-        let path_index = if code.starts_with('R') || code.starts_with('C') {
-            index + 2
+        if code.starts_with('R') {
+            if index + 2 >= parts.len() {
+                break;
+            }
+            rows.push((
+                String::from_utf8(parts[index + 1].to_vec())?,
+                "deleted".into(),
+            ));
+            rows.push((
+                String::from_utf8(parts[index + 2].to_vec())?,
+                "added".into(),
+            ));
+            index += 3;
+            continue;
+        }
+        let (path_index, status, width) = if code.starts_with('C') {
+            (index + 2, "added", 3)
         } else {
-            index + 1
+            (
+                index + 1,
+                match code.chars().next().unwrap_or('M') {
+                    'A' => "added",
+                    'D' => "deleted",
+                    _ => "modified",
+                },
+                2,
+            )
         };
         if path_index >= parts.len() {
             break;
@@ -766,11 +844,21 @@ fn changed_paths(root: &Path, base: &str) -> Result<Vec<(String, String)>> {
             String::from_utf8(parts[path_index].to_vec())?,
             status.into(),
         ));
-        index += if code.starts_with('R') || code.starts_with('C') {
-            3
-        } else {
-            2
-        };
+        index += width;
+    }
+    let untracked = git::output(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    if !untracked.status.success() {
+        bail!(
+            "could not inspect untracked working-tree files: {}",
+            String::from_utf8_lossy(&untracked.stderr).trim()
+        );
+    }
+    for path in untracked
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+    {
+        rows.push((String::from_utf8(path.to_vec())?, "added".into()));
     }
     Ok(rows)
 }
@@ -832,7 +920,7 @@ fn eligible(path: &str) -> bool {
     {
         return false;
     }
-    [".sql", ".yml", ".yaml", ".py", ".json", ".md"]
+    [".sql", ".yml", ".yaml", ".py", ".json", ".md", ".csv"]
         .iter()
         .any(|suffix| lower.ends_with(suffix))
 }
@@ -952,6 +1040,96 @@ mod tests {
     }
 
     #[test]
+    fn handoff_includes_the_exact_hashed_validation_config() {
+        let config = "version: 2\naccounts: []\n";
+        let snapshot = PreparedSnapshot {
+            dbt_root: "analytics".into(),
+            owner: "EmbrasureAI".into(),
+            name: "demo".into(),
+            base_sha: "a".repeat(40),
+            head_sha: Some("b".repeat(40)),
+            snapshot_hash: "c".repeat(64),
+            fingerprint: "d".repeat(64),
+            files: vec![],
+            validation_config: ValidationConfigSnapshot {
+                sha256: hex_digest(config.as_bytes()),
+                content_utf8: config.into(),
+                repository_path: Some("embrasure-check.yml".into()),
+            },
+            validation_options: ValidationOptionsSnapshot {
+                mode: Some(ComparisonMode::Quick),
+                downstream: Some(DownstreamPolicy::All),
+                critical_tags: Some(vec!["critical".into()]),
+                incremental_mode: Some(IncrementalMode::FullRefresh),
+                select: vec!["orders".into()],
+            },
+            total_bytes: 0,
+        };
+        let report = Report::empty("origin/main".into(), crate::config::Thresholds::default());
+        let payload = handoff_payload(&snapshot, &report, "origin/main", "Preserve totals");
+
+        assert_eq!(payload["validation_config"]["content_utf8"], config);
+        assert_eq!(
+            payload["validation_config"]["repository_path"],
+            "embrasure-check.yml"
+        );
+        assert_eq!(
+            payload["validation_config"]["sha256"],
+            hex_digest(config.as_bytes())
+        );
+        assert_eq!(payload["validation_options"]["mode"], "quick");
+        assert_eq!(payload["validation_options"]["downstream"], "all");
+        assert_eq!(
+            payload["validation_options"]["incremental_mode"],
+            "full_refresh"
+        );
+        assert_eq!(payload["validation_options"]["select"][0], "orders");
+    }
+
+    #[test]
+    fn seed_files_are_eligible_for_the_exact_cloud_snapshot() {
+        assert!(eligible("seeds/orders.csv"));
+    }
+
+    #[test]
+    fn snapshot_changes_preserve_renames_and_untracked_files() {
+        fn run_git(root: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "--quiet"]);
+        run_git(repo.path(), &["config", "user.name", "Embrasure Test"]);
+        run_git(repo.path(), &["config", "user.email", "test@embrasure.ai"]);
+        fs::create_dir(repo.path().join("models")).unwrap();
+        fs::write(repo.path().join("models/old.sql"), "select 1\n").unwrap();
+        run_git(repo.path(), &["add", "."]);
+        run_git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+        run_git(repo.path(), &["mv", "models/old.sql", "models/new.sql"]);
+        fs::write(repo.path().join("models/untracked.sql"), "select 2\n").unwrap();
+
+        let mut changes = changed_paths(repo.path(), "HEAD").unwrap();
+        changes.sort();
+        assert_eq!(
+            changes,
+            vec![
+                ("models/new.sql".into(), "added".into()),
+                ("models/old.sql".into(), "deleted".into()),
+                ("models/untracked.sql".into(), "added".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn api_errors_use_actionable_server_messages() {
         assert_eq!(
             api_error(r#"{"detail":{"message":"Connect this GitHub dbt project."}}"#),
@@ -968,7 +1146,7 @@ mod tests {
         ));
         assert!(!cache_is_fresh("not-a-timestamp"));
         let now = Utc::now().to_rfc3339();
-        assert!(cache_is_reusable("same", "same", &now, 3));
-        assert!(!cache_is_reusable("same", "same", &now, 2));
+        assert!(cache_is_reusable("same", "same", &now, 4));
+        assert!(!cache_is_reusable("same", "same", &now, 3));
     }
 }
