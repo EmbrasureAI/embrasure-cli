@@ -255,6 +255,8 @@ struct BigQueryProfileOutput {
     location: String,
     threads: u16,
     job_execution_timeout_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maximum_bytes_billed: Option<u64>,
 }
 
 impl Manifest {
@@ -1160,6 +1162,7 @@ fn write_profiles(
                     location: bigquery.location.clone(),
                     threads: config.dbt.threads,
                     job_execution_timeout_seconds: config.safety.statement_timeout_seconds,
+                    maximum_bytes_billed: bigquery.maximum_bytes_billed,
                 })
             }
             _ => bail!(
@@ -1665,6 +1668,7 @@ accounts:
       project: analytics-prod
       location: US
       production_schema: prod
+      maximum_bytes_billed: 10737418240
       auth: { type: application_default }
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
@@ -1684,6 +1688,7 @@ accounts:
         assert!(profile.contains("dataset: check_run"));
         assert!(profile.contains("location: US"));
         assert!(profile.contains("job_execution_timeout_seconds: 420"));
+        assert!(profile.contains("maximum_bytes_billed: 10737418240"));
         assert!(!profile.contains("dataset: prod"));
     }
 }

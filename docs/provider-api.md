@@ -108,7 +108,7 @@ accounts:
 
 Each provider owns a typed configuration structure. There is no string-keyed property map and no common credential enum containing every provider's fields.
 
-BigQuery uses the same version 2 shape with `type: bigquery`, `project`, `location`, `production_schema`, and `auth: { type: application_default }`. The provider resolves ADC for REST requests and writes a dbt-bigquery `method: oauth` profile so dbt uses the same credential chain.
+BigQuery uses the same version 2 shape with `type: bigquery`, `project`, `location`, `production_schema`, optional `maximum_bytes_billed`, and `auth: { type: application_default }`. The provider resolves ADC for REST requests and writes a dbt-bigquery `method: oauth` profile so dbt uses the same credential chain and per-query byte cap.
 
 Provider-specific entry points for auth, dbt profile generation, `doctor`, and `clean` are dispatched by the same tagged configuration. They do not belong on `WarehouseProvider` because the validation runner does not need them.
 
