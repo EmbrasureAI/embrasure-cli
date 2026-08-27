@@ -204,6 +204,15 @@ embrasure check --json --report-version 1
 
 Published contracts: [v1](schemas/report-v1.schema.json), [v2](schemas/report-v2.schema.json), [v3](schemas/report-v3.schema.json), and [v4](schemas/report-v4.schema.json). V4 adds column lineage and is the default; older versions remain available with `--report-version`.
 
+Save the default v4 report and open its lineage, findings, and comparison evidence in a local browser:
+
+```sh
+embrasure check --json > embrasure-report.json
+embrasure view embrasure-report.json
+```
+
+The viewer binds only to localhost and does not upload the report. Use `embrasure view --no-open embrasure-report.json` when you want to open the printed URL yourself.
+
 | Exit code | Meaning |
 |---:|---|
 | `0` | The check passed |
