@@ -69,20 +69,12 @@ impl BigQueryClient {
         let timeout_ms = self.timeout_seconds.saturating_mul(1_000);
         let url = self.api_url(&["projects", &self.account.project, "queries"])?;
         let response = self
-            .send(self.http.post(url).json(&json!({
-                "query": format!("/* {} */\n{statement}", self.query_tag),
-                "useLegacySql": false,
-                "location": self.account.location,
-                "defaultDataset": {
-                    "projectId": self.account.project,
-                    "datasetId": self.account.production_schema,
-                },
-                "timeoutMs": timeout_ms.min(200_000),
-                "jobTimeoutMs": timeout_ms.to_string(),
-                "maxResults": 10_000,
-                "requestId": Uuid::new_v4().to_string(),
-                "labels": { "embrasure_managed": "true" },
-            })))
+            .send(self.http.post(url).json(&query_request(
+                &self.account,
+                &self.query_tag,
+                statement,
+                timeout_ms,
+            )))
             .await?;
         let mut page: QueryResponse = parse_response(response, "BigQuery query request").await?;
         let job = page
@@ -358,6 +350,32 @@ impl BigQueryClient {
     fn schema_ownership_marker(&self) -> String {
         format!("Temporary schema managed by Embrasure; {}", self.query_tag)
     }
+}
+
+fn query_request(
+    account: &BigQueryConfig,
+    query_tag: &str,
+    statement: &str,
+    timeout_ms: u64,
+) -> Value {
+    let mut request = json!({
+        "query": format!("/* {query_tag} */\n{statement}"),
+        "useLegacySql": false,
+        "location": account.location,
+        "defaultDataset": {
+            "projectId": account.project,
+            "datasetId": account.production_schema,
+        },
+        "timeoutMs": timeout_ms.min(200_000),
+        "jobTimeoutMs": timeout_ms.to_string(),
+        "maxResults": 10_000,
+        "requestId": Uuid::new_v4().to_string(),
+        "labels": { "embrasure_managed": "true" },
+    });
+    if let Some(limit) = account.maximum_bytes_billed {
+        request["maximumBytesBilled"] = json!(limit.to_string());
+    }
+    request
 }
 
 fn joined_api_url(root: &Url, segments: &[&str]) -> Result<Url> {
@@ -639,6 +657,18 @@ struct DatasetReference {
 mod tests {
     use super::*;
 
+    fn bigquery_config() -> BigQueryConfig {
+        serde_yaml::from_str(
+            r#"project: analytics-prod
+location: US
+production_schema: prod
+maximum_bytes_billed: 10737418240
+auth: { type: application_default }
+"#,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn renders_clone_and_copy_operations() {
         let source = Relation {
@@ -669,6 +699,13 @@ mod tests {
             url.as_str(),
             "https://bigquery.googleapis.com/bigquery/v2/projects/analytics-prod/queries"
         );
+    }
+
+    #[test]
+    fn query_request_enforces_the_configured_byte_limit() {
+        let request = query_request(&bigquery_config(), "validation", "select 1", 300_000);
+        assert_eq!(request["maximumBytesBilled"], "10737418240");
+        assert_eq!(request["timeoutMs"], 200_000);
     }
 
     #[test]

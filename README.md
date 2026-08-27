@@ -115,11 +115,12 @@ accounts:
       project: analytics-prod
       location: US
       production_schema: prod
+      maximum_bytes_billed: 10737418240
       auth:
         type: application_default
 ```
 
-Application Default Credentials also support `GOOGLE_APPLICATION_CREDENTIALS` and an attached Google Cloud service account. Incremental baselines use BigQuery table clones; clone mode seeds candidates with table copies. The source and temporary datasets must be in the same location, and table-clone restrictions still apply.
+Application Default Credentials also support `GOOGLE_APPLICATION_CREDENTIALS` and an attached Google Cloud service account. `maximum_bytes_billed` applies the same per-query cap to dbt builds and Embrasure comparison queries. Incremental baselines use BigQuery table clones; clone mode seeds candidates with table copies. The source and temporary datasets must be in the same location, and table-clone restrictions still apply.
 
 If you do not use Homebrew, use the installer:
 

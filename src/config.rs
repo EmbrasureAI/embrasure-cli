@@ -313,6 +313,8 @@ pub struct BigQueryConfig {
     pub project: String,
     pub location: String,
     pub production_schema: String,
+    #[serde(default)]
+    pub maximum_bytes_billed: Option<u64>,
     pub auth: BigQueryAuthConfig,
 }
 
@@ -866,6 +868,12 @@ fn validate_bigquery(account: &AccountConfig, config: &BigQueryConfig) -> Result
             account.name
         );
     }
+    if config.maximum_bytes_billed == Some(0) {
+        bail!(
+            "account {} BigQuery maximum_bytes_billed must be greater than zero",
+            account.name
+        );
+    }
     match &config.auth {
         BigQueryAuthConfig::ApplicationDefault => {}
     }
@@ -1129,6 +1137,7 @@ accounts:
       project: analytics-prod
       location: US
       production_schema: prod
+      maximum_bytes_billed: 10737418240
       auth: { type: application_default }
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
@@ -1138,6 +1147,16 @@ accounts:
             config.accounts[0].provider,
             ProviderConfig::BigQuery(_)
         ));
+
+        let invalid_limit = yaml.replace("10737418240", "0");
+        let config: Config = serde_yaml::from_str(&invalid_limit).unwrap();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("maximum_bytes_billed")
+        );
 
         let invalid = yaml.replace("production_schema: prod", "production_schema: prod-data");
         let config: Config = serde_yaml::from_str(&invalid).unwrap();
