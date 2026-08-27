@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     config::{ComparisonMode, Config, DownstreamPolicy, IncrementalMode},
@@ -418,7 +419,8 @@ pub async fn handoff(
     intent: &str,
 ) -> Result<HandoffReceipt> {
     let mut session = valid_session().await?;
-    let payload = handoff_payload(snapshot, report, base_ref, intent);
+    let idempotency_key = format!("cli:{}", Uuid::new_v4());
+    let payload = handoff_payload(snapshot, report, base_ref, intent, &idempotency_key);
     let mut response = send_handoff(&session, &payload).await?;
     if response.status() == StatusCode::UNAUTHORIZED {
         session = refresh_session(&session).await?;
@@ -433,9 +435,10 @@ fn handoff_payload(
     report: &Report,
     base_ref: &str,
     intent: &str,
+    idempotency_key: &str,
 ) -> Value {
     json!({
-        "idempotency_key": format!("cli:{}", snapshot.fingerprint),
+        "idempotency_key": idempotency_key,
         "repository": {
             "provider": "github",
             "owner": snapshot.owner,
@@ -1111,7 +1114,13 @@ mod tests {
             total_bytes: 0,
         };
         let report = Report::empty("origin/main".into(), crate::config::Thresholds::default());
-        let payload = handoff_payload(&snapshot, &report, "origin/main", "Preserve totals");
+        let payload = handoff_payload(
+            &snapshot,
+            &report,
+            "origin/main",
+            "Preserve totals",
+            "cli:request-1",
+        );
 
         assert_eq!(payload["validation_config"]["content_utf8"], config);
         assert_eq!(
@@ -1129,6 +1138,7 @@ mod tests {
             "full_refresh"
         );
         assert_eq!(payload["validation_options"]["select"][0], "orders");
+        assert_eq!(payload["idempotency_key"], "cli:request-1");
     }
 
     #[test]
