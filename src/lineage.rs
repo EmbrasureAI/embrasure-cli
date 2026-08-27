@@ -51,7 +51,7 @@ struct ModelResponse {
     gaps: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ParsedEdge {
     output_column: String,
     source_column: String,
@@ -61,7 +61,7 @@ struct ParsedEdge {
     source_relation: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct SqlIdentifier {
     name: String,
     quoted: bool,
@@ -582,6 +582,40 @@ mod tests {
                 && edge.source_relation == "analytics.raw.orders"
                 && edge.source_column == "customer_id"
         }));
+    }
+
+    #[test]
+    fn sqlglot_uses_bigquery_identifier_rules() {
+        let request = Request {
+            models: vec![ModelRequest {
+                unique_id: "model.project.summary",
+                sql: "select Customer_ID, safe_cast(Amount as float64) as Total from `Analytics.Raw.Orders`",
+            }],
+        };
+        let response = invoke(&request, Some(SqlDialect::BigQuery)).unwrap();
+        let edges = &response.models[0].edges;
+        assert!(response.models[0].gaps.is_empty());
+        assert!(
+            edges.iter().any(|edge| {
+                edge.output_column == "Customer_ID"
+                    && edge.source_relation == "`Analytics.Raw.Orders`"
+                    && edge.source_column == "customer_id"
+            }),
+            "{edges:#?}"
+        );
+    }
+
+    #[test]
+    fn sqlglot_bigquery_unnest_sources_do_not_crash_lineage_extraction() {
+        let request = Request {
+            models: vec![ModelRequest {
+                unique_id: "model.project.generated",
+                sql: "select order_id, concat('category_', cast(mod(order_id, 7) as string)) as category from unnest(generate_array(1, 10)) as order_id",
+            }],
+        };
+        let response = invoke(&request, Some(SqlDialect::BigQuery)).unwrap();
+        assert_eq!(response.models.len(), 1);
+        assert_eq!(response.models[0].unique_id, "model.project.generated");
     }
 
     #[test]

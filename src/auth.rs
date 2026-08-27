@@ -3,6 +3,7 @@ use std::{
     env, fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,17 +16,19 @@ use url::Url;
 
 use crate::{
     config::{
-        AccountConfig, AuthConfig, Config, DatabricksAuthConfig, ProviderConfig, SnowflakeConfig,
+        AccountConfig, AuthConfig, BigQueryAuthConfig, Config, DatabricksAuthConfig,
+        ProviderConfig, SnowflakeConfig,
     },
     loopback, update,
 };
 
 const LOCAL_CLIENT_ID: &str = "LOCAL_APPLICATION";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ResolvedAuth {
     Snowflake(SnowflakeResolvedAuth),
     Databricks(DatabricksResolvedAuth),
+    BigQuery(BigQueryResolvedAuth),
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +48,11 @@ pub enum SnowflakeResolvedAuth {
 #[derive(Debug, Clone)]
 pub enum DatabricksResolvedAuth {
     Token { token: String },
+}
+
+#[derive(Clone)]
+pub struct BigQueryResolvedAuth {
+    pub token_provider: Option<Arc<dyn gcp_auth::TokenProvider>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +98,9 @@ pub fn placeholder(account: &AccountConfig) -> ResolvedAuth {
         ProviderConfig::Databricks(_) => ResolvedAuth::Databricks(DatabricksResolvedAuth::Token {
             token: "dry-run-not-used".into(),
         }),
+        ProviderConfig::BigQuery(_) => ResolvedAuth::BigQuery(BigQueryResolvedAuth {
+            token_provider: None,
+        }),
     }
 }
 
@@ -102,6 +113,14 @@ pub async fn resolve(account: &AccountConfig) -> Result<ResolvedAuth> {
             DatabricksAuthConfig::Token { token_env } => {
                 Ok(ResolvedAuth::Databricks(DatabricksResolvedAuth::Token {
                     token: required_env(token_env, "Databricks token")?,
+                }))
+            }
+        },
+        ProviderConfig::BigQuery(config) => match &config.auth {
+            BigQueryAuthConfig::ApplicationDefault => {
+                let token_provider = bigquery_adc_provider().await?;
+                Ok(ResolvedAuth::BigQuery(BigQueryResolvedAuth {
+                    token_provider: Some(token_provider),
                 }))
             }
         },
@@ -179,17 +198,35 @@ pub fn logout_from_config(config_path: &Path, requested: Option<&str>) -> Result
     Ok(account.name.clone())
 }
 
-pub fn status_from_config(config_path: &Path) -> Result<Vec<AuthStatus>> {
+pub async fn status_from_config(config_path: &Path) -> Result<Vec<AuthStatus>> {
     let mut config = Config::load(config_path)?;
     config.resolve_from(config_path)?;
-    config.accounts.iter().map(status).collect()
+    let mut statuses = Vec::with_capacity(config.accounts.len());
+    for account in &config.accounts {
+        statuses.push(status(account).await?);
+    }
+    Ok(statuses)
 }
 
-pub fn status(account: &AccountConfig) -> Result<AuthStatus> {
+pub async fn status(account: &AccountConfig) -> Result<AuthStatus> {
     let (method, ready, message) = match &account.provider {
         ProviderConfig::Snowflake(config) => snowflake_status(account, config)?,
         ProviderConfig::Databricks(config) => match &config.auth {
             DatabricksAuthConfig::Token { token_env } => env_status("token", token_env),
+        },
+        ProviderConfig::BigQuery(config) => match &config.auth {
+            BigQueryAuthConfig::ApplicationDefault => match bigquery_adc_provider().await {
+                Ok(_) => (
+                    "application_default",
+                    true,
+                    "Google Application Default Credentials are available".into(),
+                ),
+                Err(error) => (
+                    "application_default",
+                    false,
+                    format!("Google Application Default Credentials are unavailable: {error}"),
+                ),
+            },
         },
     };
     Ok(AuthStatus {
@@ -198,6 +235,25 @@ pub fn status(account: &AccountConfig) -> Result<AuthStatus> {
         ready,
         status: message,
     })
+}
+
+async fn bigquery_adc_provider() -> Result<Arc<dyn gcp_auth::TokenProvider>> {
+    if let Some(provider) = gcp_auth::CustomServiceAccount::from_env()
+        .context("GOOGLE_APPLICATION_CREDENTIALS is not a valid service-account JSON file")?
+    {
+        return Ok(Arc::new(provider));
+    }
+    let user_error = match gcp_auth::ConfigDefaultCredentials::new().await {
+        Ok(provider) => return Ok(Arc::new(provider)),
+        Err(error) => error,
+    };
+    let metadata_error = match gcp_auth::MetadataServiceAccount::new().await {
+        Ok(provider) => return Ok(Arc::new(provider)),
+        Err(error) => error,
+    };
+    bail!(
+        "could not resolve Google Application Default Credentials from the local ADC file or metadata service (local: {user_error}; metadata: {metadata_error})"
+    )
 }
 
 fn snowflake_status(

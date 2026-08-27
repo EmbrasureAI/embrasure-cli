@@ -107,9 +107,13 @@ def trace_model(model, dialect, unquoted_case):
                 continue
 
             source = exp.to_column(leaf.name)
+            source_name = source.name
+            if not source_name:
+                gaps.append(f"{output_column} has an unresolved source column")
+                continue
             source_column = normalize_unquoted(
-                source.name,
-                bool(source.this.args.get("quoted")),
+                source_name,
+                bool(source.this and source.this.args.get("quoted")),
                 unquoted_case,
             )
             if source_column == "*":
@@ -118,10 +122,6 @@ def trace_model(model, dialect, unquoted_case):
                     "without an authoritative input schema"
                 )
                 continue
-            if not source_column:
-                gaps.append(f"{output_column} has an unresolved source column")
-                continue
-
             edges.append(
                 {
                     "output_column": output_column,

@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     auth,
+    bigquery::BigQueryClient,
     config::{Config, ProviderConfig},
     databricks::DatabricksClient,
     provider::{QueryResult, dialect},
@@ -111,6 +112,29 @@ async fn run_inner(
                         report.candidates.push(candidate.finish(
                             &account.name,
                             &provider.catalog,
+                            remove,
+                        ));
+                    }
+                }
+                ProviderConfig::BigQuery(provider) => {
+                    let client = BigQueryClient::new(
+                        account,
+                        credential,
+                        query_tag,
+                        config.safety.statement_timeout_seconds,
+                    )?;
+                    let rows = client
+                        .stale_managed_schemas(&provider.project, &prefix, older_than_hours)
+                        .await?;
+                    for candidate in managed_candidates(rows, &prefix) {
+                        if remove {
+                            client
+                                .drop_marked_schema(&provider.project, &candidate.schema, &prefix)
+                                .await?;
+                        }
+                        report.candidates.push(candidate.finish(
+                            &account.name,
+                            &provider.project,
                             remove,
                         ));
                     }

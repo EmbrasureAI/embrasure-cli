@@ -445,7 +445,7 @@ async fn compare_primary_key<E: QueryExecutor + ?Sized>(
         .iter()
         .map(|key| {
             let key = dialect.quote_identifier(key);
-            dialect.null_safe_equal(&format!("C.{key}"), &format!("P.{key}"))
+            dialect.full_join_equal(&format!("C.{key}"), &format!("P.{key}"))
         })
         .collect::<Vec<_>>()
         .join(" AND ");

@@ -13,7 +13,7 @@
 
 <p align="center"><strong>Catch unexpected data changes before a dbt PR is reviewed.</strong></p>
 
-Embrasure is open-source, local dbt PR validation for Snowflake and Databricks:
+Embrasure is open-source, local dbt PR validation for Snowflake, Databricks, and BigQuery:
 
 - Builds changed models and critical downstream paths in temporary schemas, then cleans them up.
 - Runs dbt tests and compares schema, row counts, null rates, cardinality, ranges, and primary keys with production.
@@ -21,7 +21,7 @@ Embrasure is open-source, local dbt PR validation for Snowflake and Databricks:
 - Connects directly to your warehouse, with no Embrasure account or data sent to Embrasure.
 - Includes a [`verify`](.agents/skills/verify/SKILL.md) skill that runs the agent check-and-fix loop.
 
-`embrasure auth login` uses Snowflake OAuth. Databricks uses a token supplied through the configured environment variable. The warehouse identity needs production read access and permission to create and remove temporary schemas.
+`embrasure auth login` uses Snowflake OAuth. Databricks uses a token supplied through the configured environment variable. BigQuery uses Google Application Default Credentials. The warehouse identity needs production read access and permission to create and remove temporary schemas or datasets.
 
 ## Snowflake quickstart
 
@@ -83,6 +83,44 @@ accounts:
 
 The integration uses a Databricks SQL warehouse and Unity Catalog. Set `DATABRICKS_TOKEN`, then run `embrasure doctor` and `embrasure check`. Incremental baselines currently require managed Delta tables and use Unity Catalog shallow clones; `doctor` verifies that a suitable table and grants are available.
 
+## BigQuery
+
+Install the BigQuery dbt adapter:
+
+```sh
+python -m pip install "dbt-core>=1.5,<2" "dbt-bigquery>=1.5,<2" "sqlglot>=30,<31"
+```
+
+For local development, create Google Application Default Credentials, then initialize Embrasure from the dbt project root:
+
+```sh
+gcloud auth application-default login
+embrasure init
+embrasure doctor
+embrasure check --dry-run
+embrasure check
+```
+
+`init` detects an active BigQuery dbt profile and writes the version 2 provider configuration. The equivalent manual configuration is:
+
+```yaml
+version: 2
+dbt:
+  project_dir: .
+  profile: analytics
+accounts:
+  - name: primary
+    provider:
+      type: bigquery
+      project: analytics-prod
+      location: US
+      production_schema: prod
+      auth:
+        type: application_default
+```
+
+Application Default Credentials also support `GOOGLE_APPLICATION_CREDENTIALS` and an attached Google Cloud service account. Incremental baselines use BigQuery table clones; clone mode seeds candidates with table copies. The source and temporary datasets must be in the same location, and table-clone restrictions still apply.
+
 If you do not use Homebrew, use the installer:
 
 ```sh
@@ -131,9 +169,9 @@ winget install --id EmbrasureAI.Embrasure --exact
 
 </details>
 
-Use Embrasure from an existing Snowflake or Databricks dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
+Use Embrasure from an existing Snowflake, Databricks, or BigQuery dbt project whose unchanged production models are already materialized. Embrasure uses those existing relations as the comparison baseline.
 
-For Snowflake, `init` reads the active dbt profile and asks only for missing values. Databricks uses the version 2 configuration shown above. Use `--config <path>` before or after any subcommand to choose another config file.
+For Snowflake and BigQuery, `init` reads the active dbt profile and asks only for missing values. Databricks uses the version 2 configuration shown above. Use `--config <path>` before or after any subcommand to choose another config file.
 
 Continue only when `embrasure doctor` reports `READY`. Embrasure generates a temporary dbt profile for its own runs; it does not modify your existing profile or production models.
 
@@ -312,7 +350,7 @@ Your `generate_schema_name` macro must preserve the complete target schema. Make
 
 ### Incremental relation cannot be cloned
 
-Every existing incremental model needs a stable baseline copy, including in `full-refresh` mode. Snowflake supports tables that can be zero-copy cloned; Databricks currently supports managed Delta tables that can be shallow cloned. Use another materialization or exclude an unsupported relation from this validation path.
+Every existing incremental model needs a stable baseline copy, including in `full-refresh` mode. Snowflake supports tables that can be zero-copy cloned; Databricks currently supports managed Delta tables that can be shallow cloned; BigQuery supports base tables, table clones, and table snapshots accepted by `CREATE TABLE CLONE`. Use another materialization or exclude an unsupported relation from this validation path.
 
 ### Incremental candidate seeding fails
 
