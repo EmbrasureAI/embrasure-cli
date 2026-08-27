@@ -9,14 +9,16 @@ use directories::BaseDirs;
 use serde::Serialize;
 use serde_yaml::Value;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Options {
     pub profile: Option<String>,
+    pub provider: Option<String>,
     pub account: Option<String>,
     pub user: Option<String>,
     pub role: Option<String>,
     pub database: Option<String>,
     pub warehouse: Option<String>,
+    pub location: Option<String>,
     pub production_schema: Option<String>,
 }
 
@@ -34,13 +36,35 @@ struct GeneratedDbt<'a> {
 }
 
 #[derive(Serialize)]
-struct GeneratedAccount<'a> {
+#[serde(untagged)]
+enum GeneratedAccount<'a> {
+    Snowflake(GeneratedSnowflakeAccount<'a>),
+    Tagged(GeneratedTaggedAccount<'a>),
+}
+
+#[derive(Serialize)]
+struct GeneratedSnowflakeAccount<'a> {
     name: &'static str,
     account: &'a str,
     user: &'a str,
     role: &'a str,
     database: &'a str,
     warehouse: &'a str,
+    production_schema: &'a str,
+    auth: GeneratedAuth,
+}
+
+#[derive(Serialize)]
+struct GeneratedTaggedAccount<'a> {
+    name: &'static str,
+    provider: GeneratedBigQueryProvider<'a>,
+}
+
+#[derive(Serialize)]
+struct GeneratedBigQueryProvider<'a> {
+    r#type: &'static str,
+    project: &'a str,
+    location: &'a str,
     production_schema: &'a str,
     auth: GeneratedAuth,
 }
@@ -65,6 +89,20 @@ pub fn run(config_path: &Path, force: bool, options: Options) -> Result<()> {
 
     let defaults = discover_defaults(project_file);
     println!("Set up Embrasure for this dbt project.\n");
+
+    let provider = options
+        .provider
+        .clone()
+        .or_else(|| defaults.provider.clone())
+        .unwrap_or_else(|| "snowflake".into());
+    if provider.eq_ignore_ascii_case("bigquery") {
+        return run_bigquery(config_path, options, defaults);
+    }
+    if !provider.eq_ignore_ascii_case("snowflake") {
+        bail!(
+            "detected dbt adapter {provider}; init currently supports Snowflake and BigQuery projects"
+        );
+    }
 
     let profile = detected_or_required("dbt profile", options.profile.or(defaults.profile))?;
     let account = detected_or_required(
@@ -92,7 +130,7 @@ pub fn run(config_path: &Path, force: bool, options: Options) -> Result<()> {
             project_dir: ".",
             profile: &profile,
         },
-        accounts: vec![GeneratedAccount {
+        accounts: vec![GeneratedAccount::Snowflake(GeneratedSnowflakeAccount {
             name: "primary",
             account: &account,
             user: &user,
@@ -103,7 +141,7 @@ pub fn run(config_path: &Path, force: bool, options: Options) -> Result<()> {
             auth: GeneratedAuth {
                 r#type: "oauth_local",
             },
-        }],
+        })],
     };
 
     let yaml = serde_yaml::to_string(&generated).context("could not generate configuration")?;
@@ -112,6 +150,46 @@ pub fn run(config_path: &Path, force: bool, options: Options) -> Result<()> {
 
     println!(
         "\nCreated {}.\n\nNext:\n  embrasure auth login\n  embrasure doctor\n  embrasure check",
+        config_path.display()
+    );
+    Ok(())
+}
+
+fn run_bigquery(config_path: &Path, options: Options, defaults: Options) -> Result<()> {
+    let profile = detected_or_required("dbt profile", options.profile.or(defaults.profile))?;
+    let project = detected_or_required("BigQuery project", options.database.or(defaults.database))?;
+    let location = detected_or_required(
+        "BigQuery location",
+        options.location.or(defaults.location).or(Some("US".into())),
+    )?;
+    let production_schema = match options.production_schema {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => required("Production dataset", Some("prod".to_owned()))?,
+    };
+    let generated = GeneratedConfig {
+        version: 2,
+        dbt: GeneratedDbt {
+            project_dir: ".",
+            profile: &profile,
+        },
+        accounts: vec![GeneratedAccount::Tagged(GeneratedTaggedAccount {
+            name: "primary",
+            provider: GeneratedBigQueryProvider {
+                r#type: "bigquery",
+                project: &project,
+                location: &location,
+                production_schema: &production_schema,
+                auth: GeneratedAuth {
+                    r#type: "application_default",
+                },
+            },
+        })],
+    };
+    let yaml = serde_yaml::to_string(&generated).context("could not generate configuration")?;
+    fs::write(config_path, yaml)
+        .with_context(|| format!("could not write {}", config_path.display()))?;
+    println!(
+        "\nCreated {}.\n\nEnsure Google Application Default Credentials are available, then run:\n  embrasure doctor\n  embrasure check",
         config_path.display()
     );
     Ok(())
@@ -185,11 +263,14 @@ fn discover_defaults(project_file: &Path) -> Options {
         return defaults;
     };
 
+    defaults.provider = mapping_string(output, "type");
     defaults.account = mapping_string(output, "account");
     defaults.user = mapping_string(output, "user");
     defaults.role = mapping_string(output, "role");
-    defaults.database = mapping_string(output, "database");
+    defaults.database =
+        mapping_string(output, "project").or_else(|| mapping_string(output, "database"));
     defaults.warehouse = mapping_string(output, "warehouse");
+    defaults.location = mapping_string(output, "location");
     defaults
 }
 

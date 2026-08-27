@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::{
     auth,
-    config::{Config, DatabricksConfig, ProviderConfig, SnowflakeConfig},
+    bigquery::BigQueryClient,
+    config::{BigQueryConfig, Config, DatabricksConfig, ProviderConfig, SnowflakeConfig},
     databricks::DatabricksClient,
     dbt, lineage, metabase,
     provider::{QueryResult, Relation, SqlDialect, WarehouseProvider, dialect},
@@ -62,7 +63,7 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
 
     for account in &config.accounts {
         let scope = format!("{}:{}", dialect(account).dbt_adapter_name(), account.name);
-        let auth_status = match auth::status(account) {
+        let auth_status = match auth::status(account).await {
             Ok(status) => status,
             Err(error) => {
                 report.fail(&scope, "credential", format!("{error:#}"));
@@ -118,6 +119,27 @@ pub async fn run(config_path: &Path, write_test: bool) -> DoctorReport {
                 ) {
                     Ok(client) => {
                         check_databricks(
+                            &client,
+                            provider,
+                            &scope,
+                            &config.safety.schema_prefix,
+                            write_test,
+                            &mut report,
+                        )
+                        .await
+                    }
+                    Err(error) => report.fail(&scope, "authentication", format!("{error:#}")),
+                }
+            }
+            ProviderConfig::BigQuery(provider) => {
+                match BigQueryClient::new(
+                    account,
+                    &resolved,
+                    query_tag,
+                    config.safety.statement_timeout_seconds,
+                ) {
+                    Ok(client) => {
+                        check_bigquery(
                             &client,
                             provider,
                             &scope,
@@ -289,6 +311,76 @@ async fn check_databricks(
         client,
         dialect,
         &account.catalog,
+        &account.production_schema,
+        schema_prefix,
+        clone_source,
+        scope,
+        write_test,
+        report,
+    )
+    .await;
+}
+
+async fn check_bigquery(
+    client: &BigQueryClient,
+    account: &BigQueryConfig,
+    scope: &str,
+    schema_prefix: &str,
+    write_test: bool,
+    report: &mut DoctorReport,
+) {
+    match client.execute("SELECT SESSION_USER()").await {
+        Ok(result) => match verify_bigquery_session(account, &result) {
+            Ok(identity) => report.pass(scope, "session", identity),
+            Err(error) => {
+                report.fail(scope, "session", format!("{error:#}"));
+                return;
+            }
+        },
+        Err(error) => {
+            report.fail(scope, "session", format!("{error:#}"));
+            return;
+        }
+    }
+    let dialect = SqlDialect::BigQuery;
+    let tables = client
+        .execute(&format!(
+            "SELECT table_name, table_type FROM {}.{}.INFORMATION_SCHEMA.TABLES ORDER BY table_name",
+            dialect.quote_identifier(&account.project),
+            dialect.quote_identifier(&account.production_schema),
+        ))
+        .await;
+    let mut clone_source = None;
+    match tables {
+        Ok(tables) => {
+            let relations = tables
+                .rows
+                .iter()
+                .filter_map(|row| row.first().and_then(|value| value.clone()))
+                .collect::<Vec<_>>();
+            clone_source = tables.rows.iter().find_map(|row| {
+                let kind = row.get(1)?.as_deref()?;
+                matches!(kind, "BASE TABLE" | "CLONE" | "SNAPSHOT")
+                    .then(|| row.first().and_then(|value| value.clone()))
+                    .flatten()
+            });
+            check_readable_relation(
+                client,
+                dialect,
+                &account.project,
+                &account.production_schema,
+                &relations,
+                scope,
+                report,
+            )
+            .await;
+        }
+        Err(error) => report.fail(scope, "production_read", format!("{error:#}")),
+    }
+    check_schema_lifecycle(
+        client,
+        dialect,
+        &account.project,
         &account.production_schema,
         schema_prefix,
         clone_source,
@@ -473,6 +565,19 @@ fn verify_databricks_session(account: &DatabricksConfig, result: &QueryResult) -
         }
     }
     Ok(values.join(" / "))
+}
+
+fn verify_bigquery_session(account: &BigQueryConfig, result: &QueryResult) -> Result<String> {
+    let identity = result
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(Option::as_deref)
+        .context("BigQuery session query returned no user")?;
+    Ok(format!(
+        "{identity} / {} / {}",
+        account.project, account.location
+    ))
 }
 
 fn relation_names(result: &QueryResult) -> Vec<String> {

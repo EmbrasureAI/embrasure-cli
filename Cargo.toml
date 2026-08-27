@@ -9,7 +9,7 @@ license = "Apache-2.0"
 repository = "https://github.com/EmbrasureAI/embrasure-cli"
 homepage = "https://embrasure.ai"
 readme = "README.md"
-keywords = ["dbt", "snowflake", "databricks", "data-quality", "cli"]
+keywords = ["dbt", "data-warehouse", "data-quality", "testing", "cli"]
 categories = ["command-line-utilities", "development-tools::testing"]
 
 [[bin]]
@@ -27,6 +27,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 globset = "0.4"
+gcp_auth = "0.12.7"
 directories = "6.0"
 keyring = { version = "4.1", optional = true }
 openssl = { version = "0.10", features = ["vendored"] }

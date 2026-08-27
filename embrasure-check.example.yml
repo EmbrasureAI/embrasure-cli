@@ -29,7 +29,7 @@ validation:
   # for changed models only. Full downstream impact is always reported.
   downstream: critical
   critical_tags: [critical]
-  # Existing incremental models start from zero-copy production clones.
+  # Existing incremental models start from provider-specific production copies.
   incremental_mode: clone
 
 thresholds:
@@ -64,6 +64,17 @@ accounts:
   #   auth:
   #     type: programmatic_access_token
   #     token_env: SECONDARY_SNOWFLAKE_PAT
+
+  # For BigQuery, change the top-level version to 2 and replace the Snowflake
+  # account above with this typed provider block:
+  # - name: primary
+  #   provider:
+  #     type: bigquery
+  #     project: analytics-prod
+  #     location: US
+  #     production_schema: prod
+  #     auth:
+  #       type: application_default
 
 models:
   # Keys may be dbt unique IDs or model names.

@@ -949,7 +949,7 @@ async fn compare_keyed<E: QueryExecutor + ?Sized>(
     let join = keys
         .iter()
         .map(|pair| {
-            dialect.null_safe_equal(
+            dialect.full_join_equal(
                 &format!("C.{}", dialect.quote_identifier(&pair.0.name)),
                 &format!("P.{}", dialect.quote_identifier(&pair.1.name)),
             )
@@ -1196,7 +1196,7 @@ async fn compare_unkeyed<E: QueryExecutor + ?Sized>(
         .collect::<Vec<_>>();
     let join = canonical
         .iter()
-        .map(|name| dialect.null_safe_equal(&format!("C.{name}"), &format!("P.{name}")))
+        .map(|name| dialect.full_join_equal(&format!("C.{name}"), &format!("P.{name}")))
         .collect::<Vec<_>>()
         .join(" AND ");
     let cte = format!(

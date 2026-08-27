@@ -1,4 +1,5 @@
 mod auth;
+mod bigquery;
 mod clean;
 #[cfg(feature = "cloud-demo")]
 mod cloud;
@@ -117,6 +118,8 @@ enum Command {
         #[arg(long, hide = true)]
         warehouse: Option<String>,
         #[arg(long, hide = true)]
+        location: Option<String>,
+        #[arg(long, hide = true)]
         production_schema: Option<String>,
     },
     /// Build and compare changed dbt models, then run configured query checks.
@@ -171,14 +174,14 @@ enum Command {
     },
     /// Check local tools, credentials, warehouse permissions, optional Metabase access, and available updates.
     Doctor {
-        /// Skip the temporary schema create/drop permission test.
+        /// Skip the temporary schema or dataset create/drop permission test.
         #[arg(long)]
         read_only: bool,
         /// Emit exactly one JSON document on stdout.
         #[arg(long)]
         json: bool,
     },
-    /// Manage interactive Snowflake browser sessions.
+    /// Inspect warehouse credentials or manage Snowflake browser sessions.
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
@@ -194,9 +197,9 @@ enum Command {
         #[arg(value_enum)]
         shell: CompletionShell,
     },
-    /// List or remove old Embrasure-managed temporary schemas.
+    /// List or remove old Embrasure-managed temporary schemas or datasets.
     Clean {
-        /// Minimum schema age in hours.
+        /// Minimum schema or dataset age in hours.
         #[arg(long, default_value_t = 6)]
         older_than: u64,
         /// Remove matched schemas. Without this flag, only list them.
@@ -268,17 +271,20 @@ async fn main() -> ExitCode {
             role,
             database,
             warehouse,
+            location,
             production_schema,
         } => match init::run(
             &config,
             force,
             init::Options {
                 profile,
+                provider: None,
                 account,
                 user,
                 role,
                 database,
                 warehouse,
+                location,
                 production_schema,
             },
         ) {
@@ -508,7 +514,7 @@ async fn main() -> ExitCode {
                     Err(error) => fail(error),
                 }
             }
-            AuthCommand::Status { json } => match auth::status_from_config(&config) {
+            AuthCommand::Status { json } => match auth::status_from_config(&config).await {
                 Ok(statuses) => {
                     if json {
                         println!(

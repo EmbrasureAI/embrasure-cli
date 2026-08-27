@@ -205,6 +205,7 @@ struct Profile {
 enum ProfileOutput {
     Snowflake(SnowflakeProfileOutput),
     Databricks(DatabricksProfileOutput),
+    BigQuery(BigQueryProfileOutput),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +243,18 @@ struct DatabricksProfileOutput {
     schema: String,
     token: String,
     threads: u16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BigQueryProfileOutput {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    method: &'static str,
+    project: String,
+    dataset: String,
+    location: String,
+    threads: u16,
+    job_execution_timeout_seconds: u64,
 }
 
 impl Manifest {
@@ -1138,6 +1151,17 @@ fn write_profiles(
                     threads: config.dbt.threads,
                 })
             }
+            (ProviderConfig::BigQuery(bigquery), ResolvedAuth::BigQuery(_)) => {
+                ProfileOutput::BigQuery(BigQueryProfileOutput {
+                    kind: provider::dialect(account).dbt_adapter_name(),
+                    method: "oauth",
+                    project: bigquery.project.clone(),
+                    dataset: schema(account),
+                    location: bigquery.location.clone(),
+                    threads: config.dbt.threads,
+                    job_execution_timeout_seconds: config.safety.statement_timeout_seconds,
+                })
+            }
             _ => bail!(
                 "resolved auth provider does not match account {}",
                 account.name
@@ -1627,5 +1651,39 @@ accounts:
         assert!(profile.contains("catalog: analytics"));
         assert!(profile.contains("token: secret-token"));
         assert!(!profile.contains("warehouse:"));
+    }
+
+    #[test]
+    fn bigquery_profile_uses_adc_and_the_run_dataset() {
+        let yaml = r#"
+version: 2
+safety: { statement_timeout_seconds: 420 }
+accounts:
+  - name: warehouse
+    provider:
+      type: bigquery
+      project: analytics-prod
+      location: US
+      production_schema: prod
+      auth: { type: application_default }
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        let auth = BTreeMap::from([(
+            "warehouse".into(),
+            ResolvedAuth::BigQuery(crate::auth::BigQueryResolvedAuth {
+                token_provider: None,
+            }),
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        write_profiles(&config, &auth, dir.path(), |_| "check_run".into(), "tag").unwrap();
+        let profile = fs::read_to_string(dir.path().join("profiles.yml")).unwrap();
+        assert!(profile.contains("type: bigquery"));
+        assert!(profile.contains("method: oauth"));
+        assert!(profile.contains("project: analytics-prod"));
+        assert!(profile.contains("dataset: check_run"));
+        assert!(profile.contains("location: US"));
+        assert!(profile.contains("job_execution_timeout_seconds: 420"));
+        assert!(!profile.contains("dataset: prod"));
     }
 }

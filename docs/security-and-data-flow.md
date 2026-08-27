@@ -18,7 +18,7 @@ Local terminal or report
 Optional: Embrasure reads metadata from your configured Metabase URL.
 ```
 
-Validation SQL runs in Snowflake or Databricks. Embrasure does not upload warehouse data, dbt artifacts, reports, credentials, or usage information to Embrasure.
+Validation SQL runs in Snowflake, Databricks, or BigQuery. Embrasure does not upload warehouse data, dbt artifacts, reports, credentials, or usage information to Embrasure.
 
 ## Outbound connections
 
@@ -26,6 +26,7 @@ The CLI itself makes only these connections:
 
 - `https://<account>.snowflakecomputing.com` for browser authentication and Snowflake SQL API requests.
 - The configured Databricks workspace host for Statement Execution API requests.
+- `https://bigquery.googleapis.com` for BigQuery jobs and temporary dataset lifecycle requests, plus the Google OAuth token or Google Cloud metadata endpoint selected by Application Default Credentials.
 - The configured Metabase URL when the optional Metabase integration is enabled.
 - `https://api.github.com/repos/EmbrasureAI/embrasure-cli/releases/latest` for `embrasure update --check`, `embrasure update`, and the gated doctor notice.
 - `https://github.com/EmbrasureAI/embrasure-cli/releases/download/...` when `embrasure update` downloads a release and its checksums.
@@ -52,6 +53,7 @@ Query checks accept a single read-only query expression, but syntax validation i
 - The configuration file contains warehouse identifiers and environment-variable names, not secret values.
 - Programmatic access tokens and external OAuth tokens are read from environment variables.
 - Databricks tokens are read from the configured environment variable and sent only to the configured workspace host and the temporary dbt profile.
+- BigQuery uses Google Application Default Credentials. Depending on the environment, those credentials come from a service-account JSON file named by `GOOGLE_APPLICATION_CREDENTIALS`, the local ADC file created by gcloud, or an attached Google Cloud service account. Access tokens are sent only to Google APIs and are not written to Embrasure configuration or reports.
 - RSA private keys are read from the configured local path.
 - Browser OAuth sessions are cached under `~/.config/embrasure-check/oauth/` by default on Unix, with owner-only file and directory permissions. Windows sessions are encrypted for the current user with DPAPI and stored under `%APPDATA%\embrasure-check\oauth\`. Run `embrasure auth logout` to remove a cached session.
 - Temporary dbt profiles, manifests, target directories, and the detached base worktree live under an operating-system temporary directory and are removed after the process exits normally.
@@ -73,13 +75,15 @@ Incremental baselines use Snowflake table-level zero-copy clones. Embrasure neve
 
 For Databricks, use a Unity Catalog SQL warehouse. The identity needs `USE CATALOG`, production schema/table read access, and permission to create schemas and tables in the configured catalog. Incremental baselines currently use managed Delta shallow clones; candidate seeding uses CTAS so it does not create an unsupported nested shallow clone.
 
+For BigQuery, the identity needs permission to create query jobs, read production table data and metadata, create and delete temporary datasets, and create, update, and delete tables inside those datasets. Typical predefined roles are BigQuery Job User on the project plus Data Viewer on production datasets and Data Editor or Data Owner on the temporary-dataset project. Embrasure creates each temporary dataset with an explicit empty legacy access list so BigQuery does not add its default project-wide dataset ACL entries; inherited IAM still applies. Incremental baselines use writable table clones; candidate seeding uses table copies. BigQuery requires clone sources and destinations to share a location and organization, and recently streamed rows in write-optimized storage are not included in a clone.
+
 ## Schema cleanup
 
 Each run uses unique candidate and baseline schema names and writes an ownership marker to every schema. Cleanup requires both the exact run namespace and matching marker. The CLI refuses to drop a schema that fails either check.
 
-Snowflake schemas are dropped with `RESTRICT` instead of the Snowflake `CASCADE` default, so cleanup never removes foreign keys held by objects outside the schema. Databricks schemas are dropped with `CASCADE` only after both the run namespace and ownership marker are verified; the cascade is limited to objects inside that temporary Unity Catalog schema.
+Snowflake schemas are dropped with `RESTRICT` instead of the Snowflake `CASCADE` default, so cleanup never removes foreign keys held by objects outside the schema. Databricks schemas are dropped with `CASCADE` only after both the run namespace and ownership marker are verified; the cascade is limited to objects inside that temporary Unity Catalog schema. BigQuery datasets are deleted with their contents only after the dataset name, managed label, and exact ownership description are verified.
 
-Cleanup is attempted after success, findings, execution failures, Ctrl-C, and normal termination signals. No process can clean up after `SIGKILL`, a machine crash, or power loss. `embrasure clean` lists old marked schemas by default and removes them only with `--yes`. It searches only each configured account database and verifies both the configured prefix and an Embrasure ownership marker before removal.
+Cleanup is attempted after success, findings, execution failures, Ctrl-C, and normal termination signals. No process can clean up after `SIGKILL`, a machine crash, or power loss. `embrasure clean` lists old marked schemas or datasets by default and removes them only with `--yes`. It searches only each configured account database or project and verifies both the configured prefix and an Embrasure ownership marker before removal.
 
 ## Release integrity
 

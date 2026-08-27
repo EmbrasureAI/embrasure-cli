@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use crate::{
     auth::ResolvedAuth,
+    bigquery::BigQueryClient,
     config::{AccountConfig, ProviderConfig},
     databricks::DatabricksClient,
     snowflake::SnowflakeClient,
@@ -45,6 +46,7 @@ impl Relation {
 pub enum SqlDialect {
     Snowflake,
     Databricks,
+    BigQuery,
 }
 
 impl SqlDialect {
@@ -52,6 +54,7 @@ impl SqlDialect {
         match self {
             Self::Snowflake => "snowflake",
             Self::Databricks => "databricks",
+            Self::BigQuery => "bigquery",
         }
     }
 
@@ -59,6 +62,7 @@ impl SqlDialect {
         match self {
             Self::Snowflake => "upper",
             Self::Databricks => "lower",
+            Self::BigQuery => "preserve",
         }
     }
 
@@ -66,6 +70,7 @@ impl SqlDialect {
         match self {
             Self::Snowflake => "snowflake",
             Self::Databricks => "databricks",
+            Self::BigQuery => "bigquery",
         }
     }
 
@@ -73,6 +78,7 @@ impl SqlDialect {
         match self {
             Self::Snowflake => format!("\"{}\"", value.replace('"', "\"\"")),
             Self::Databricks => format!("`{}`", value.replace('`', "``")),
+            Self::BigQuery => format!("`{}`", value.replace('`', "\\`")),
         }
     }
 
@@ -82,6 +88,7 @@ impl SqlDialect {
             Self::Snowflake => value.to_owned(),
             Self::Databricks if !quoted.unwrap_or(false) => value.to_ascii_lowercase(),
             Self::Databricks => value.to_owned(),
+            Self::BigQuery => value.to_owned(),
         }
     }
 
@@ -91,20 +98,21 @@ impl SqlDialect {
                 format!("CREATE TRANSIENT TABLE {} AS {query}", target.sql(self))
             }
             Self::Databricks => format!("CREATE TABLE {} AS {query}", target.sql(self)),
+            Self::BigQuery => format!("CREATE TABLE {} AS {query}", target.sql(self)),
         }
     }
 
     pub fn cast_text(self, expression: &str) -> String {
         match self {
             Self::Snowflake => format!("{expression}::VARCHAR"),
-            Self::Databricks => format!("CAST({expression} AS STRING)"),
+            Self::Databricks | Self::BigQuery => format!("CAST({expression} AS STRING)"),
         }
     }
 
     pub fn to_text(self, expression: &str) -> String {
         match self {
             Self::Snowflake => format!("TO_VARCHAR({expression})"),
-            Self::Databricks => format!("CAST({expression} AS STRING)"),
+            Self::Databricks | Self::BigQuery => format!("CAST({expression} AS STRING)"),
         }
     }
 
@@ -112,6 +120,7 @@ impl SqlDialect {
         match self {
             Self::Snowflake => format!("{expression}::DOUBLE"),
             Self::Databricks => format!("CAST({expression} AS DOUBLE)"),
+            Self::BigQuery => format!("CAST({expression} AS FLOAT64)"),
         }
     }
 
@@ -119,20 +128,31 @@ impl SqlDialect {
         match self {
             Self::Snowflake => format!("EQUAL_NULL({left}, {right})"),
             Self::Databricks => format!("{left} <=> {right}"),
+            Self::BigQuery => format!("{left} IS NOT DISTINCT FROM {right}"),
+        }
+    }
+
+    pub fn full_join_equal(self, left: &str, right: &str) -> String {
+        match self {
+            Self::BigQuery => format!("({left} = {right} OR ({left} IS NULL AND {right} IS NULL))"),
+            Self::Snowflake | Self::Databricks => self.null_safe_equal(left, right),
         }
     }
 
     pub fn conditional(self, condition: &str, when_true: &str, when_false: &str) -> String {
         match self {
             Self::Snowflake => format!("IFF({condition}, {when_true}, {when_false})"),
-            Self::Databricks => {
+            Self::Databricks | Self::BigQuery => {
                 format!("CASE WHEN {condition} THEN {when_true} ELSE {when_false} END")
             }
         }
     }
 
     pub fn count_if(self, condition: &str) -> String {
-        format!("COUNT_IF({condition})")
+        match self {
+            Self::BigQuery => format!("COUNTIF({condition})"),
+            Self::Snowflake | Self::Databricks => format!("COUNT_IF({condition})"),
+        }
     }
 
     pub fn approximate_distinct(self, expression: &str) -> String {
@@ -140,18 +160,33 @@ impl SqlDialect {
     }
 
     pub fn supports_column_metrics(self, data_type: &str) -> bool {
-        self != Self::Databricks || !self.is_unsupported_value(data_type)
+        !matches!(self, Self::Databricks | Self::BigQuery) || !self.is_unsupported_value(data_type)
     }
 
     pub fn approximate_percentile(self, expression: &str, percentile: &str) -> String {
         match self {
             Self::Snowflake => format!("APPROX_PERCENTILE({expression}, {percentile})"),
             Self::Databricks => format!("PERCENTILE_APPROX({expression}, {percentile})"),
+            Self::BigQuery => {
+                let offset = percentile
+                    .parse::<f64>()
+                    .map(|value| (value * 100.0).round() as u32)
+                    .unwrap_or(50);
+                format!("APPROX_QUANTILES({expression}, 100)[OFFSET({offset})]")
+            }
         }
     }
 
     pub fn stable_hash(self, expressions: &[String]) -> String {
-        format!("HASH({})", expressions.join(", "))
+        match self {
+            Self::BigQuery => format!(
+                "FARM_FINGERPRINT(TO_JSON_STRING(STRUCT({})))",
+                expressions.join(", ")
+            ),
+            Self::Snowflake | Self::Databricks => {
+                format!("HASH({})", expressions.join(", "))
+            }
+        }
     }
 
     pub fn is_numeric(self, data_type: &str) -> bool {
@@ -194,6 +229,17 @@ impl SqlDialect {
                             | "decimal"
                     )
             }
+            Self::BigQuery => matches!(
+                data_type.to_ascii_uppercase().as_str(),
+                "INT64"
+                    | "INTEGER"
+                    | "FLOAT64"
+                    | "FLOAT"
+                    | "NUMERIC"
+                    | "DECIMAL"
+                    | "BIGNUMERIC"
+                    | "BIGDECIMAL"
+            ),
         }
     }
 
@@ -214,6 +260,14 @@ impl SqlDialect {
                     .next()
                     .unwrap_or_default(),
                 "ARRAY" | "MAP" | "STRUCT" | "VARIANT" | "BINARY" | "GEOGRAPHY" | "GEOMETRY"
+            ),
+            Self::BigQuery => !matches!(
+                data_type
+                    .to_ascii_uppercase()
+                    .split(['<', '('])
+                    .next()
+                    .unwrap_or_default(),
+                "ARRAY" | "STRUCT" | "GEOGRAPHY" | "JSON" | "INTERVAL"
             ),
         }
     }
@@ -237,6 +291,15 @@ impl SqlDialect {
                     .to_ascii_uppercase()
                     .as_str(),
                 "ARRAY" | "MAP" | "STRUCT" | "VARIANT" | "GEOGRAPHY" | "GEOMETRY"
+            ),
+            Self::BigQuery => matches!(
+                data_type
+                    .split(['<', '(', ' '])
+                    .next()
+                    .unwrap_or(data_type)
+                    .to_ascii_uppercase()
+                    .as_str(),
+                "ARRAY" | "STRUCT" | "RECORD" | "GEOGRAPHY" | "JSON" | "INTERVAL"
             ),
         }
     }
@@ -290,6 +353,12 @@ pub fn connect(
             query_tag,
             timeout_seconds,
         )?)),
+        ProviderConfig::BigQuery(_) => Ok(Arc::new(BigQueryClient::new(
+            account,
+            auth,
+            query_tag,
+            timeout_seconds,
+        )?)),
     }
 }
 
@@ -297,6 +366,7 @@ pub fn dialect(account: &AccountConfig) -> SqlDialect {
     match &account.provider {
         ProviderConfig::Snowflake(_) => SqlDialect::Snowflake,
         ProviderConfig::Databricks(_) => SqlDialect::Databricks,
+        ProviderConfig::BigQuery(_) => SqlDialect::BigQuery,
     }
 }
 
@@ -334,5 +404,19 @@ mod tests {
             databricks.null_safe_equal("left", "right"),
             "left <=> right"
         );
+        let bigquery = SqlDialect::BigQuery;
+        assert_eq!(bigquery.quote_identifier("odd`name"), "`odd\\`name`");
+        assert_eq!(bigquery.normalize_identifier("Mixed", None), "Mixed");
+        assert_eq!(bigquery.count_if("value IS NULL"), "COUNTIF(value IS NULL)");
+        assert_eq!(
+            bigquery.approximate_percentile("value", "0.95"),
+            "APPROX_QUANTILES(value, 100)[OFFSET(95)]"
+        );
+        assert_eq!(
+            bigquery.full_join_equal("C.key", "P.key"),
+            "(C.key = P.key OR (C.key IS NULL AND P.key IS NULL))"
+        );
+        assert!(bigquery.is_numeric("BIGNUMERIC"));
+        assert!(!bigquery.supports_column_metrics("ARRAY<STRING>"));
     }
 }

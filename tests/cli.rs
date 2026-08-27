@@ -134,6 +134,52 @@ fn init_reuses_values_from_the_active_dbt_profile() {
 }
 
 #[test]
+fn init_generates_a_typed_bigquery_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let profiles_directory = directory.path().join("profiles");
+    fs::create_dir(&profiles_directory).unwrap();
+    fs::write(
+        directory.path().join("dbt_project.yml"),
+        "name: analytics\nprofile: analytics\n",
+    )
+    .unwrap();
+    fs::write(
+        profiles_directory.join("profiles.yml"),
+        r#"analytics:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: analytics-prod
+      dataset: developer
+      location: europe-west1
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("embrasure")
+        .unwrap()
+        .current_dir(directory.path())
+        .env("DBT_PROFILES_DIR", &profiles_directory)
+        .arg("init")
+        .write_stdin("production\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Production dataset [prod]"))
+        .stdout(predicate::str::contains("BigQuery project").not());
+
+    let config = fs::read_to_string(directory.path().join("embrasure-check.yml")).unwrap();
+    assert!(config.contains("version: 2"));
+    assert!(config.contains("type: bigquery"));
+    assert!(config.contains("project: analytics-prod"));
+    assert!(config.contains("location: europe-west1"));
+    assert!(config.contains("production_schema: production"));
+    assert!(config.contains("type: application_default"));
+    assert!(!config.contains("dataset: developer"));
+}
+
+#[test]
 fn doctor_returns_execution_failure_for_a_missing_config() {
     Command::cargo_bin("embrasure")
         .unwrap()

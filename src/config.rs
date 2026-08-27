@@ -281,6 +281,8 @@ impl From<AccountConfigWire> for AccountConfig {
 pub enum ProviderConfig {
     Snowflake(SnowflakeConfig),
     Databricks(DatabricksConfig),
+    #[serde(rename = "bigquery")]
+    BigQuery(BigQueryConfig),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -306,12 +308,27 @@ pub struct DatabricksConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BigQueryConfig {
+    pub project: String,
+    pub location: String,
+    pub production_schema: String,
+    pub auth: BigQueryAuthConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DatabricksAuthConfig {
     Token {
         #[serde(default = "default_databricks_token_env")]
         token_env: String,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BigQueryAuthConfig {
+    ApplicationDefault,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -338,6 +355,7 @@ impl AccountConfig {
         match &self.provider {
             ProviderConfig::Snowflake(config) => &config.database,
             ProviderConfig::Databricks(config) => &config.catalog,
+            ProviderConfig::BigQuery(config) => &config.project,
         }
     }
 
@@ -345,20 +363,28 @@ impl AccountConfig {
         match &self.provider {
             ProviderConfig::Snowflake(config) => &config.production_schema,
             ProviderConfig::Databricks(config) => &config.production_schema,
+            ProviderConfig::BigQuery(config) => &config.production_schema,
         }
     }
 
     pub fn snowflake(&self) -> Option<&SnowflakeConfig> {
         match &self.provider {
             ProviderConfig::Snowflake(config) => Some(config),
-            ProviderConfig::Databricks(_) => None,
+            ProviderConfig::Databricks(_) | ProviderConfig::BigQuery(_) => None,
         }
     }
 
     pub fn databricks(&self) -> Option<&DatabricksConfig> {
         match &self.provider {
-            ProviderConfig::Snowflake(_) => None,
+            ProviderConfig::Snowflake(_) | ProviderConfig::BigQuery(_) => None,
             ProviderConfig::Databricks(config) => Some(config),
+        }
+    }
+
+    pub fn bigquery(&self) -> Option<&BigQueryConfig> {
+        match &self.provider {
+            ProviderConfig::Snowflake(_) | ProviderConfig::Databricks(_) => None,
+            ProviderConfig::BigQuery(config) => Some(config),
         }
     }
 }
@@ -586,6 +612,7 @@ impl Config {
             match &account.provider {
                 ProviderConfig::Snowflake(config) => validate_snowflake(account, config)?,
                 ProviderConfig::Databricks(config) => validate_databricks(account, config)?,
+                ProviderConfig::BigQuery(config) => validate_bigquery(account, config)?,
             }
         }
         let mut check_names = BTreeSet::new();
@@ -794,6 +821,53 @@ fn validate_databricks(account: &AccountConfig, config: &DatabricksConfig) -> Re
             bail!("account {} has an empty token_env", account.name)
         }
         DatabricksAuthConfig::Token { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_bigquery(account: &AccountConfig, config: &BigQueryConfig) -> Result<()> {
+    for (field, value) in [
+        ("project", &config.project),
+        ("location", &config.location),
+        ("production_schema", &config.production_schema),
+    ] {
+        if value.trim().is_empty() {
+            bail!("account {} has an empty {field}", account.name);
+        }
+    }
+    if config.project.len() > 255
+        || config.project.contains(['/', '\\'])
+        || config.project.chars().any(char::is_whitespace)
+    {
+        bail!(
+            "account {} BigQuery project must be a project ID without whitespace or path separators",
+            account.name
+        );
+    }
+    if config.production_schema.len() > 1024
+        || !config
+            .production_schema
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        bail!(
+            "account {} BigQuery production_schema must contain only letters, numbers, or underscores",
+            account.name
+        );
+    }
+    if config.location.len() > 255
+        || !config
+            .location
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        bail!(
+            "account {} BigQuery location must contain only letters, numbers, or hyphens",
+            account.name
+        );
+    }
+    match &config.auth {
+        BigQueryAuthConfig::ApplicationDefault => {}
     }
     Ok(())
 }
@@ -1041,6 +1115,38 @@ accounts:
                 .unwrap_err()
                 .to_string()
                 .contains("http_path")
+        );
+    }
+
+    #[test]
+    fn version_two_accepts_a_typed_bigquery_provider() {
+        let yaml = r#"
+version: 2
+accounts:
+  - name: warehouse
+    provider:
+      type: bigquery
+      project: analytics-prod
+      location: US
+      production_schema: prod
+      auth: { type: application_default }
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.accounts[0].database(), "analytics-prod");
+        assert!(matches!(
+            config.accounts[0].provider,
+            ProviderConfig::BigQuery(_)
+        ));
+
+        let invalid = yaml.replace("production_schema: prod", "production_schema: prod-data");
+        let config: Config = serde_yaml::from_str(&invalid).unwrap();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("production_schema")
         );
     }
 
