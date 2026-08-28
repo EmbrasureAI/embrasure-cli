@@ -1,6 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     auth::ResolvedAuth,
@@ -11,6 +12,50 @@ use crate::{
 };
 
 pub type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WarehouseExecution {
+    pub provider: String,
+    pub account: String,
+    pub execution_id: String,
+    pub url: String,
+}
+
+impl WarehouseExecution {
+    pub fn bigquery(account: &str, project: &str, location: &str, execution_id: &str) -> Self {
+        Self {
+            provider: "bigquery".into(),
+            account: account.into(),
+            execution_id: execution_id.into(),
+            url: format!(
+                "https://console.cloud.google.com/bigquery?project={project}&j=bq:{location}:{execution_id}&page=queryresults"
+            ),
+        }
+    }
+
+    pub fn snowflake(account: &str, account_host: &str, execution_id: &str) -> Self {
+        Self {
+            provider: "snowflake".into(),
+            account: account.into(),
+            execution_id: execution_id.into(),
+            url: format!(
+                "https://{account_host}/console#/monitoring/queries/detail?queryId={execution_id}"
+            ),
+        }
+    }
+
+    pub fn databricks(account: &str, workspace_url: &str, execution_id: &str) -> Self {
+        Self {
+            provider: "databricks".into(),
+            account: account.into(),
+            execution_id: execution_id.into(),
+            url: format!(
+                "{}/sql/history?queryId={execution_id}",
+                workspace_url.trim_end_matches('/')
+            ),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct QueryResult {
@@ -312,6 +357,10 @@ pub trait QueryExecutor: Send + Sync {
 }
 
 pub trait WarehouseProvider: QueryExecutor {
+    fn warehouse_executions(&self) -> Vec<WarehouseExecution> {
+        vec![]
+    }
+
     fn create_schema<'a>(&'a self, database: &'a str, schema: &'a str) -> ProviderFuture<'a, ()>;
 
     fn copy_table<'a>(
@@ -379,6 +428,28 @@ pub fn is_managed_schema(dialect: SqlDialect, schema: &str, run_schema: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warehouse_execution_links_use_provider_native_history() {
+        assert_eq!(
+            WarehouseExecution::snowflake(
+                "primary",
+                "org-account.snowflakecomputing.com",
+                "query-1",
+            )
+            .url,
+            "https://org-account.snowflakecomputing.com/console#/monitoring/queries/detail?queryId=query-1"
+        );
+        assert_eq!(
+            WarehouseExecution::databricks(
+                "primary",
+                "https://workspace.cloud.databricks.com/",
+                "statement-1",
+            )
+            .url,
+            "https://workspace.cloud.databricks.com/sql/history?queryId=statement-1"
+        );
+    }
 
     #[test]
     fn dialects_render_their_provider_contracts() {

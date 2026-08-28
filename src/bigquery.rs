@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -18,7 +18,7 @@ use crate::{
     config::{AccountConfig, BigQueryConfig},
     provider::{
         ProviderFuture, QueryExecutor, QueryResult, Relation, ResultColumn, SqlDialect,
-        WarehouseProvider, is_managed_schema,
+        WarehouseExecution, WarehouseProvider, is_managed_schema,
     },
 };
 
@@ -34,6 +34,8 @@ pub struct BigQueryClient {
     query_tag: String,
     timeout_seconds: u64,
     api_root: Url,
+    account_name: String,
+    executions: Arc<Mutex<Vec<WarehouseExecution>>>,
 }
 
 impl BigQueryClient {
@@ -43,6 +45,7 @@ impl BigQueryClient {
         query_tag: String,
         timeout_seconds: u64,
     ) -> Result<Self> {
+        let account_name = account.name.clone();
         let account = account
             .bigquery()
             .context("BigQuery client requires BigQuery account configuration")?;
@@ -61,6 +64,8 @@ impl BigQueryClient {
             query_tag,
             timeout_seconds,
             api_root: Url::parse(API_ROOT)?,
+            account_name,
+            executions: Arc::new(Mutex::new(vec![])),
         })
     }
 
@@ -81,6 +86,14 @@ impl BigQueryClient {
             .job_reference
             .clone()
             .context("BigQuery query response omitted its job reference")?;
+        if let Ok(mut executions) = self.executions.lock() {
+            executions.push(WarehouseExecution::bigquery(
+                &self.account_name,
+                &job.project_id,
+                &job.location,
+                &job.job_id,
+            ));
+        }
 
         while !page.job_complete {
             if started.elapsed() >= Duration::from_secs(self.timeout_seconds) {
@@ -398,6 +411,13 @@ impl QueryExecutor for BigQueryClient {
 }
 
 impl WarehouseProvider for BigQueryClient {
+    fn warehouse_executions(&self) -> Vec<WarehouseExecution> {
+        self.executions
+            .lock()
+            .map(|items| items.clone())
+            .unwrap_or_default()
+    }
+
     fn create_schema<'a>(&'a self, project: &'a str, schema: &'a str) -> ProviderFuture<'a, ()> {
         Box::pin(BigQueryClient::create_schema(self, project, schema))
     }

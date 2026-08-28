@@ -149,7 +149,7 @@ The installer verifies the release checksum, installs Embrasure under `%LOCALAPP
 
 Installer options:
 
-- Pin a release: `& $installer -Version 0.5.3`
+- Pin a release: `& $installer -Version 0.5.4`
 - Run without prompts: `& $installer -Quiet`
 - Uninstall: `& $installer -Uninstall`
 
@@ -241,7 +241,7 @@ embrasure check --json --markdown embrasure-check.md
 embrasure check --json --report-version 1
 ```
 
-Published contracts: [v1](schemas/report-v1.schema.json), [v2](schemas/report-v2.schema.json), [v3](schemas/report-v3.schema.json), and [v4](schemas/report-v4.schema.json). V4 adds column lineage and is the default; older versions remain available with `--report-version`.
+Published contracts: [v1](schemas/report-v1.schema.json), [v2](schemas/report-v2.schema.json), [v3](schemas/report-v3.schema.json), and [v4](schemas/report-v4.schema.json). V4 adds column lineage and bounded warehouse execution links and is the default; older versions remain available with `--report-version`.
 
 | Exit code | Meaning |
 |---:|---|

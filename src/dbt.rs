@@ -180,6 +180,7 @@ pub struct DbtContext {
 pub struct BuildResult {
     pub passed: bool,
     pub failures: Vec<BuildFailure>,
+    pub warehouse_executions: Vec<crate::provider::WarehouseExecution>,
 }
 
 #[derive(Debug)]
@@ -934,6 +935,7 @@ pub fn build_models(
         return Ok(BuildResult {
             passed: true,
             failures: vec![],
+            warehouse_executions: vec![],
         });
     }
     let target_path = context.build_target(&account.name);
@@ -967,10 +969,12 @@ pub fn build_models(
         &context.profiles_dir,
         &args,
     )?;
+    let warehouse_executions = load_run_executions(&target_path.join("run_results.json"), account)?;
     if output.status.success() {
         return Ok(BuildResult {
             passed: true,
             failures: vec![],
+            warehouse_executions,
         });
     }
     let mut failures = load_run_failures(&target_path.join("run_results.json"))?;
@@ -983,7 +987,66 @@ pub fn build_models(
     Ok(BuildResult {
         passed: false,
         failures,
+        warehouse_executions,
     })
+}
+
+fn load_run_executions(
+    path: &Path,
+    account: &AccountConfig,
+) -> Result<Vec<crate::provider::WarehouseExecution>> {
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let value: Value = serde_json::from_slice(&fs::read(path)?)
+        .with_context(|| format!("invalid dbt run results {}", path.display()))?;
+    let mut executions = vec![];
+    for result in value
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(response) = result.get("adapter_response").and_then(Value::as_object) else {
+            continue;
+        };
+        let execution = match &account.provider {
+            crate::config::ProviderConfig::BigQuery(config) => {
+                response.get("job_id").and_then(Value::as_str).map(|id| {
+                    crate::provider::WarehouseExecution::bigquery(
+                        &account.name,
+                        &config.project,
+                        &config.location,
+                        id,
+                    )
+                })
+            }
+            crate::config::ProviderConfig::Snowflake(config) => {
+                response.get("query_id").and_then(Value::as_str).map(|id| {
+                    crate::provider::WarehouseExecution::snowflake(
+                        &account.name,
+                        &crate::auth::account_host(&config.account),
+                        id,
+                    )
+                })
+            }
+            crate::config::ProviderConfig::Databricks(config) => response
+                .get("statement_id")
+                .or_else(|| response.get("query_id"))
+                .and_then(Value::as_str)
+                .map(|id| {
+                    crate::provider::WarehouseExecution::databricks(
+                        &account.name,
+                        &config.workspace_url(),
+                        id,
+                    )
+                }),
+        };
+        if let Some(execution) = execution {
+            executions.push(execution);
+        }
+    }
+    Ok(executions)
 }
 
 fn dbt_selector(node: &ManifestNode) -> Result<String> {
@@ -1521,6 +1584,40 @@ mod tests {
     #[test]
     fn malformed_dbt_ls_output_is_not_silently_ignored() {
         assert!(unique_ids("not-json").is_err());
+    }
+
+    #[test]
+    fn dbt_run_results_preserve_bigquery_job_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("run_results.json");
+        fs::write(
+            &path,
+            r#"{"results":[{"adapter_response":{"job_id":"job-123"}}]}"#,
+        )
+        .unwrap();
+        let account: AccountConfig = serde_yaml::from_str(
+            r#"
+name: primary
+provider:
+  type: bigquery
+  project: analytics-prod
+  location: US
+  production_schema: prod
+  auth:
+    type: application_default
+"#,
+        )
+        .unwrap();
+
+        let executions = load_run_executions(&path, &account).unwrap();
+
+        assert_eq!(executions.len(), 1);
+        assert_eq!(executions[0].provider, "bigquery");
+        assert_eq!(executions[0].execution_id, "job-123");
+        assert_eq!(
+            executions[0].url,
+            "https://console.cloud.google.com/bigquery?project=analytics-prod&j=bq:US:job-123&page=queryresults"
+        );
     }
 
     #[test]

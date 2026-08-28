@@ -33,6 +33,8 @@ The CLI itself makes only these connections:
 
 There is no telemetry or analytics SDK. `embrasure update` is opt-in. Human, interactive `embrasure doctor` output may check for a release at most once every 24 hours. The notice is disabled for JSON output, piped stderr, `CI`, or `NO_UPDATE_NOTIFIER`, and network failures are silent. The local `dbt` process may connect to the configured warehouse or download packages according to the dbt project's own configuration. Normal local validation does not contact Embrasure.
 
+Report v4 can include up to 50 warehouse execution IDs and provider-console links. It does not include SQL text or credentials in that evidence.
+
 ## Data returned to the local process
 
 The configured warehouse returns the comparison evidence used in the local report:

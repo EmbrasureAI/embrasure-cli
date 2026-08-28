@@ -24,9 +24,23 @@
     "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
     "coverage_gaps": { "type": "array", "items": { "$ref": "#/$defs/coverage_gap" } },
     "notices": { "type": "array", "items": { "$ref": "#/$defs/notice" } },
-    "execution_errors": { "type": "array", "items": { "type": "string" } }
+    "execution_errors": { "type": "array", "items": { "type": "string" } },
+    "warehouse_executions": {
+      "type": "array", "maxItems": 50,
+      "items": { "$ref": "#/$defs/warehouse_execution" }
+    }
   },
   "$defs": {
+    "warehouse_execution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "account", "execution_id", "url"],
+      "properties": {
+        "provider": { "enum": ["bigquery", "snowflake", "databricks"] },
+        "account": { "type": "string", "minLength": 1 },
+        "execution_id": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" }
+      }
+    },
     "ci_schema": {
       "type": "object", "additionalProperties": false,
       "required": ["account", "database", "schema", "cleaned_up"],
