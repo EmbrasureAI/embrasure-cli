@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -26,7 +27,7 @@ use crate::{
     config::{AccountConfig, SnowflakeConfig},
     provider::{
         ProviderFuture, QueryExecutor, QueryResult, Relation, ResultColumn, SqlDialect,
-        WarehouseProvider, is_managed_schema,
+        WarehouseExecution, WarehouseProvider, is_managed_schema,
     },
 };
 
@@ -39,6 +40,8 @@ pub struct SnowflakeClient {
     account: SnowflakeConfig,
     query_tag: String,
     timeout_seconds: u64,
+    account_name: String,
+    executions: Arc<Mutex<Vec<WarehouseExecution>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +59,7 @@ impl SnowflakeClient {
         query_tag: String,
         timeout_seconds: u64,
     ) -> Result<Self> {
+        let account_name = account.name.clone();
         let account = account
             .snowflake()
             .context("Snowflake client requires Snowflake account configuration")?;
@@ -88,6 +92,8 @@ impl SnowflakeClient {
             account: account.clone(),
             query_tag,
             timeout_seconds,
+            account_name,
+            executions: Arc::new(Mutex::new(vec![])),
         })
     }
 
@@ -156,6 +162,15 @@ impl SnowflakeClient {
                 bail!("Snowflake statement failed (HTTP {status}, code {code}): {message}{hint}");
             }
             let handle = body.statement_handle.clone();
+            if let Some(execution_id) = handle.as_deref()
+                && let Ok(mut executions) = self.executions.lock()
+            {
+                executions.push(WarehouseExecution::snowflake(
+                    &self.account_name,
+                    &account_host(&self.account.account),
+                    execution_id,
+                ));
+            }
             let mut result = QueryResult {
                 columns: body
                     .metadata
@@ -337,6 +352,13 @@ impl QueryExecutor for SnowflakeClient {
 }
 
 impl WarehouseProvider for SnowflakeClient {
+    fn warehouse_executions(&self) -> Vec<WarehouseExecution> {
+        self.executions
+            .lock()
+            .map(|items| items.clone())
+            .unwrap_or_default()
+    }
+
     fn create_schema<'a>(&'a self, database: &'a str, schema: &'a str) -> ProviderFuture<'a, ()> {
         Box::pin(SnowflakeClient::create_schema(self, database, schema))
     }

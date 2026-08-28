@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use reqwest::{Client, StatusCode, header};
@@ -12,7 +15,7 @@ use crate::{
     config::{AccountConfig, DatabricksConfig},
     provider::{
         ProviderFuture, QueryExecutor, QueryResult, Relation, ResultColumn, SqlDialect,
-        WarehouseProvider, is_managed_schema,
+        WarehouseExecution, WarehouseProvider, is_managed_schema,
     },
 };
 
@@ -25,6 +28,8 @@ pub struct DatabricksClient {
     account: DatabricksConfig,
     query_tag: String,
     timeout_seconds: u64,
+    account_name: String,
+    executions: Arc<Mutex<Vec<WarehouseExecution>>>,
 }
 
 impl DatabricksClient {
@@ -34,6 +39,7 @@ impl DatabricksClient {
         query_tag: String,
         timeout_seconds: u64,
     ) -> Result<Self> {
+        let account_name = account.name.clone();
         let account = account
             .databricks()
             .context("Databricks client requires Databricks account configuration")?;
@@ -51,6 +57,8 @@ impl DatabricksClient {
             account: account.clone(),
             query_tag,
             timeout_seconds,
+            account_name,
+            executions: Arc::new(Mutex::new(vec![])),
         })
     }
 
@@ -75,6 +83,15 @@ impl DatabricksClient {
                 .await
                 .context("Databricks Statement Execution request failed")?;
             let mut body = parse_response(response).await?;
+            if let Some(execution_id) = body.statement_id.as_deref()
+                && let Ok(mut executions) = self.executions.lock()
+            {
+                executions.push(WarehouseExecution::databricks(
+                    &self.account_name,
+                    &self.workspace_url,
+                    execution_id,
+                ));
+            }
             loop {
                 match body.status.state.as_str() {
                     "PENDING" | "RUNNING" => {
@@ -313,6 +330,13 @@ impl QueryExecutor for DatabricksClient {
 }
 
 impl WarehouseProvider for DatabricksClient {
+    fn warehouse_executions(&self) -> Vec<WarehouseExecution> {
+        self.executions
+            .lock()
+            .map(|items| items.clone())
+            .unwrap_or_default()
+    }
+
     fn create_schema<'a>(&'a self, catalog: &'a str, schema: &'a str) -> ProviderFuture<'a, ()> {
         Box::pin(DatabricksClient::create_schema(self, catalog, schema))
     }

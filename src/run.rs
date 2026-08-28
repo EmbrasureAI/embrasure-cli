@@ -225,6 +225,11 @@ async fn execute(
         progress.cleanup(0, report.ci_schemas.len());
     }
     cleanup_schemas(config, &clients, &schema, report, options.progress.as_ref()).await;
+    for client in &clients {
+        report
+            .warehouse_executions
+            .extend(client.warehouse_executions());
+    }
     Ok(())
 }
 
@@ -1005,6 +1010,9 @@ async fn execute_with_dbt(
             config.validation.incremental_mode == IncrementalMode::FullRefresh,
         )
         .with_context(|| format!("could not execute dbt build for account {}", account.name))?;
+        report
+            .warehouse_executions
+            .extend(build.warehouse_executions);
         if !build.passed {
             if let Some(progress) = progress {
                 progress.fail_current();

@@ -5,8 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{CrossAccountDependency, DownstreamPolicy, Thresholds},
+    provider::WarehouseExecution,
     style::Style,
 };
+
+const MAX_WAREHOUSE_EXECUTIONS: usize = 50;
 
 pub const EXIT_PASS: u8 = 0;
 pub const EXIT_FINDINGS: u8 = 1;
@@ -52,6 +55,8 @@ pub struct Report {
     pub coverage_gaps: Vec<CoverageGap>,
     pub notices: Vec<Notice>,
     pub execution_errors: Vec<String>,
+    #[serde(skip)]
+    pub warehouse_executions: Vec<WarehouseExecution>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -324,6 +329,7 @@ impl Report {
             coverage_gaps: vec![],
             notices: vec![],
             execution_errors: vec![],
+            warehouse_executions: vec![],
         }
     }
 
@@ -339,6 +345,9 @@ impl Report {
         self.findings.dedup();
         self.coverage_gaps.sort();
         self.coverage_gaps.dedup();
+        self.warehouse_executions.sort();
+        self.warehouse_executions.dedup();
+        self.warehouse_executions.truncate(MAX_WAREHOUSE_EXECUTIONS);
         self.notices.sort();
         self.notices.dedup();
         self.validation_scope.validated_models.sort();
@@ -1095,6 +1104,7 @@ struct ReportV4<'a> {
     coverage_gaps: &'a [CoverageGap],
     notices: &'a [Notice],
     execution_errors: &'a [String],
+    warehouse_executions: &'a [WarehouseExecution],
 }
 
 #[derive(Serialize)]
@@ -1136,6 +1146,7 @@ impl<'a> From<&'a Report> for ReportV4<'a> {
             coverage_gaps: &report.coverage_gaps,
             notices: &report.notices,
             execution_errors: &report.execution_errors,
+            warehouse_executions: &report.warehouse_executions,
         }
     }
 }
@@ -1517,6 +1528,14 @@ mod tests {
             invalid_primary_key_reason: None,
             examples_truncated: false,
         });
+        report
+            .warehouse_executions
+            .push(WarehouseExecution::bigquery(
+                "primary",
+                "analytics-prod",
+                "US",
+                "job-123",
+            ));
         report.finalize();
         report
     }
@@ -1711,9 +1730,11 @@ mod tests {
         let v3: serde_json::Value =
             serde_json::from_str(&report.json(ReportVersion::V3).unwrap()).unwrap();
         assert!(v3["impact"].get("column_lineage").is_none());
+        assert!(v3.get("warehouse_executions").is_none());
         let v4: serde_json::Value =
             serde_json::from_str(&report.json(ReportVersion::V4).unwrap()).unwrap();
         assert_eq!(v4["schema_version"], 4);
+        assert_eq!(v4["warehouse_executions"][0]["execution_id"], "job-123");
         assert_eq!(v4["impact"]["column_lineage"].as_array().unwrap().len(), 1);
         assert_eq!(
             v4["impact"]["column_lineage_gaps"]
