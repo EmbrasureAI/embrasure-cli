@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Embrasure report</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: oklch(15.6% .0054 67.4);
+      --surface: oklch(21.19% .0114 73.3);
+      --foreground: oklch(96.5% .0114 84.6);
+      --muted: oklch(83.38% .0149 50.8);
+      --muted-soft: color-mix(in oklch, var(--muted) 66%, var(--border));
+      --border: oklch(36.32% .0136 95.4);
+      --border-soft: color-mix(in oklch, var(--border) 48%, var(--surface));
+      --brand: oklch(64.18% .0671 282.3);
+      --brand-tint: var(--brand);
+      --highlight: oklch(68.86% .0582 103.2);
+      --danger: oklch(68% .1215 31);
+      --success: oklch(76% .13 151);
+      --edge: oklch(48% .012 73.3);
+      font-family: Inter, "Helvetica Neue", Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; color: var(--foreground); background: var(--background); }
+    button { font: inherit; }
+    .app { min-height: 100%; display: flex; flex-direction: column; }
+    .topbar {
+      min-height: 54px; display: flex; align-items: center; justify-content: space-between;
+      gap: 24px; padding: 0 22px; color: var(--foreground); background: var(--background);
+    }
+    .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .brand-logo { display: flex; width: 121px; height: 29px; }
+    .brand-logo svg { display: block; width: 100%; height: 100%; }
+    .brand-logo:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+    .brand-separator { width: 1px; height: 16px; margin: 0 2px; background: var(--border); }
+    .brand-section { color: var(--muted); font-size: 12px; }
+    .run-base { min-width: 0; color: var(--muted-soft); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .report-head {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 20px;
+      min-height: 72px; padding: 15px 22px; border-bottom: 1px solid var(--border); background: var(--surface);
+    }
+    .report-head h1 { margin: 0; font-family: Georgia, serif; font-size: 22px; font-weight: 400; letter-spacing: -.015em; }
+    .report-meta { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .report-state { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .report-state.findings, .report-state.execution_failure { color: var(--danger); }
+    .report-state.incomplete { color: var(--highlight); }
+    .workspace { flex: 1; min-height: 550px; display: grid; grid-template-columns: minmax(0, 1fr) 348px; }
+    .graph-panel { min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+    .panel-head {
+      min-height: 46px; display: flex; align-items: baseline; justify-content: space-between; gap: 20px;
+      flex-wrap: wrap; row-gap: 2px; padding: 8px 18px;
+      border-bottom: 1px solid var(--border-soft); background: var(--surface);
+    }
+    .panel-head h2 { flex: none; margin: 0; font-family: Georgia, serif; font-size: 14px; font-weight: 400; }
+    .panel-meta {
+      min-width: 0; max-width: 100%; margin-left: auto; color: var(--muted-soft); text-align: right;
+      overflow-wrap: anywhere; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .graph-viewport { position: relative; flex: 1; min-height: 500px; overflow: auto; background: var(--background); }
+    .graph-stage { position: relative; min-width: 100%; min-height: 100%; }
+    .edges { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+    .edge { fill: none; stroke: var(--edge); stroke-width: 1.2; }
+    .edge-arrow { fill: var(--edge); }
+    .edge-arrow-active { fill: var(--brand); }
+    .edge.is-connected { stroke: var(--brand); stroke-width: 1.8; }
+    .node {
+      position: absolute; width: 178px; min-height: 62px; padding: 11px 12px 10px 14px;
+      text-align: left; color: var(--foreground); background: var(--surface); border: 1px solid var(--border);
+      border-left: 3px solid var(--success); border-radius: 4px; cursor: pointer;
+    }
+    .node:hover { border-color: color-mix(in oklch, var(--brand) 70%, var(--border)); }
+    .node:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+    .node.is-selected { border-color: var(--brand); background: color-mix(in srgb, var(--brand-tint) 28%, var(--surface)); }
+    .node.findings, .node.execution_failure {
+      border-left-color: var(--danger);
+      background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+    }
+    .node.incomplete {
+      border-left-color: var(--highlight);
+      background: color-mix(in oklch, var(--highlight) 7%, var(--surface));
+    }
+    .node.impact { border-left-color: var(--muted-soft); }
+    .node-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
+    .node-meta { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; }
+    .inspector { min-width: 0; background: var(--surface); overflow: auto; }
+    .inspector-head { padding: 18px 18px 15px; border-bottom: 1px solid var(--border); }
+    .inspector h2 { margin: 0; font-family: Georgia, serif; font-size: 21px; font-weight: 400; letter-spacing: -.015em; overflow-wrap: anywhere; }
+    .inspector-kind { margin-top: 6px; color: var(--muted); font-size: 11px; }
+    .inspector-id { margin-top: 5px; color: var(--muted-soft); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .inspector-body { padding: 0 18px 24px; }
+    .detail-section { padding: 15px 0; border-bottom: 1px solid var(--border-soft); }
+    .detail-section:last-child { border-bottom: 0; }
+    .detail-section h3 { margin: 0 0 10px; font-family: Georgia, serif; font-size: 14px; font-weight: 400; }
+    .detail-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+    .detail-list li { color: var(--foreground); font-size: 12px; line-height: 1.45; }
+    .finding { padding-left: 9px; border-left: 2px solid var(--danger); }
+    .gap { padding-left: 9px; border-left: 2px solid var(--highlight); }
+    .facts { display: grid; grid-template-columns: 1fr auto; gap: 0; margin: 0; font-size: 11px; }
+    .facts dt, .facts dd { padding: 5px 0; border-bottom: 1px solid var(--border-soft); }
+    .facts dt:last-of-type, .facts dd:last-of-type { border-bottom: 0; }
+    .facts dt { color: var(--muted); }
+    .facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+    .flow { display: grid; grid-template-columns: minmax(0,1fr) 14px minmax(0,1fr); align-items: center; gap: 4px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .flow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .flow b { color: var(--muted-soft); text-align: center; font-weight: 400; }
+    .empty { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    @media (max-width: 820px) {
+      .workspace { grid-template-columns: 1fr; }
+      .graph-panel { border-right: 0; }
+      .graph-viewport { min-height: 460px; }
+      .inspector { border-top: 1px solid var(--border); }
+    }
+    @media (max-width: 520px) {
+      .topbar, .report-head { padding-left: 15px; padding-right: 15px; }
+      .brand-section, .brand-separator { display: none; }
+      .report-head { align-items: flex-start; flex-direction: column; gap: 5px; }
+      .panel-head { padding-left: 14px; padding-right: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <a class="brand-logo" href="https://embrasure.ai/" aria-label="Embrasure home">__EMBRASURE_LOGO__</a>
+        <span class="brand-separator" aria-hidden="true"></span>
+        <span class="brand-section">Report</span>
+      </div>
+      <div class="run-base" id="run-base"></div>
+    </header>
+    <header class="report-head">
+      <div>
+        <h1 id="report-title"></h1>
+        <p class="report-meta" id="report-meta"></p>
+      </div>
+      <div class="report-state" id="report-state"></div>
+    </header>
+    <section class="workspace">
+      <div class="graph-panel">
+        <header class="panel-head">
+          <h2>Lineage</h2>
+          <div class="panel-meta" id="lineage-meta"></div>
+        </header>
+        <div class="graph-viewport" id="graph-viewport">
+          <div class="graph-stage" id="graph-stage">
+            <svg class="edges" id="edges" aria-hidden="true"></svg>
+          </div>
+        </div>
+      </div>
+      <aside class="inspector" aria-live="polite">
+        <header class="inspector-head">
+          <h2 id="inspector-title">Select a node</h2>
+          <div class="inspector-kind" id="inspector-kind">Comparison evidence</div>
+          <div class="inspector-id" id="inspector-id"></div>
+        </header>
+        <div class="inspector-body" id="inspector-body"></div>
+      </aside>
+    </section>
+  </main>
+  <script>
+    const report = __EMBRASURE_REPORT__;
+    const values = value => Array.isArray(value) ? value : [];
+    const impact = report.impact || {};
+    const models = values(report.models);
+    const queries = values(report.query_checks);
+    const findings = values(report.findings);
+    const gaps = values(report.coverage_gaps);
+    const columnLineage = values(impact.column_lineage);
+    const nodeMap = new Map();
+    const edges = [];
+
+    const addNode = (id, name, type, record = null) => {
+      if (!id) return;
+      const current = nodeMap.get(id);
+      nodeMap.set(id, {id, name: name || current?.name || id, type: current?.type || type, record: record || current?.record || null});
+    };
+    values(impact.dbt_models).forEach(item => addNode(item.id, item.name, "model"));
+    models.forEach(item => addNode(item.unique_id, item.name, "model", item));
+    values(impact.dbt_exposures).forEach(item => addNode(item.id, item.name, "exposure", item));
+    values(impact.dbt_lineage).forEach(edge => {
+      addNode(edge.from, edge.from_name, "model");
+      addNode(edge.to, edge.to_name, "model");
+      edges.push({from: edge.from, to: edge.to});
+    });
+    queries.forEach(query => {
+      const id = `query:${query.name}`;
+      addNode(id, query.name, "query", query);
+      values(query.current_refs).forEach(ref => {
+        const match = [...nodeMap.values()].find(node => node.id === ref || node.name === ref || node.id.endsWith(`.${ref}`));
+        if (match) edges.push({from: match.id, to: id});
+      });
+    });
+
+    const nodes = [...nodeMap.values()];
+    const modelFor = node => models.find(model => model.unique_id === node.id || model.name === node.name) || (node.type === "model" ? node.record : null);
+    const findingsFor = node => findings.filter(item => item.model === node.id || item.model === node.name || item.model === `query:${node.name}`);
+    const gapsFor = node => gaps.filter(item => item.scope === node.id || item.scope === node.name || item.scope === `query:${node.name}`);
+    const statusFor = node => {
+      if (findingsFor(node).length) return "findings";
+      if (gapsFor(node).length) return "incomplete";
+      if (node.type === "query" && ["findings", "incomplete", "execution_failure"].includes(node.record?.status)) return node.record.status;
+      const model = modelFor(node);
+      if (model?.dbt_build === "failed") return "execution_failure";
+      if (model?.comparison || node.type === "query" && node.record?.status === "pass") return "pass";
+      return "impact";
+    };
+    const statusLabel = status => ({pass: "passed", findings: "issue detected", incomplete: "not validated", execution_failure: "run failed", impact: "downstream impact"})[status] || status;
+    const typeLabel = type => ({model: "dbt model", query: "query check", exposure: "dbt exposure"})[type] || type;
+    const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[character]);
+    const formatNumber = value => Number(value ?? 0).toLocaleString();
+    const formatPercent = value => `${(Number(value ?? 0) * 100).toFixed(1)}%`;
+    const plural = (count, word) => `${formatNumber(count)} ${word}${count === 1 ? "" : "s"}`;
+
+    const overall = report.status || "pass";
+    const compared = report.summary?.models_compared ?? models.length;
+    document.getElementById("run-base").textContent = report.base || "production";
+    document.getElementById("report-title").textContent = findings.length ? `${plural(findings.length, "issue")} detected` : "No issues detected";
+    document.getElementById("report-meta").textContent = `${plural(compared, "model")} compared · ${plural(queries.length, "query check")} · ${plural(gaps.length, "coverage gap")}`;
+    const reportState = document.getElementById("report-state");
+    reportState.className = `report-state ${overall}`;
+    const reportStateLabel = ({pass: "passed", findings: "issues detected", incomplete: "incomplete", execution_failure: "run failed"})[overall] || overall;
+    reportState.textContent = `${reportStateLabel} · exit ${report.exit_code ?? 0}`;
+    document.getElementById("lineage-meta").textContent = `${plural(nodes.length, "node")} · ${formatNumber(edges.length)} ${edges.length === 1 ? "dependency" : "dependencies"}`;
+
+    const levels = new Map(nodes.map(node => [node.id, 0]));
+    const outgoing = new Map(nodes.map(node => [node.id, []]));
+    const indegree = new Map(nodes.map(node => [node.id, 0]));
+    edges.forEach(edge => {
+      if (!outgoing.has(edge.from) || !indegree.has(edge.to)) return;
+      outgoing.get(edge.from).push(edge.to);
+      indegree.set(edge.to, indegree.get(edge.to) + 1);
+    });
+    const queue = nodes.filter(node => indegree.get(node.id) === 0).map(node => node.id);
+    for (let index = 0; index < queue.length; index += 1) {
+      const id = queue[index];
+      outgoing.get(id).forEach(next => {
+        levels.set(next, Math.max(levels.get(next), levels.get(id) + 1));
+        indegree.set(next, indegree.get(next) - 1);
+        if (indegree.get(next) === 0) queue.push(next);
+      });
+    }
+    const grouped = new Map();
+    nodes.forEach(node => {
+      const level = levels.get(node.id) || 0;
+      if (!grouped.has(level)) grouped.set(level, []);
+      grouped.get(level).push(node);
+    });
+    grouped.forEach(group => group.sort((a, b) => a.name.localeCompare(b.name)));
+
+    const nodeElements = new Map();
+    const maxLevel = Math.max(0, ...levels.values());
+    const maxRows = Math.max(1, ...[...grouped.values()].map(group => group.length));
+    const stage = document.getElementById("graph-stage");
+    const viewport = document.getElementById("graph-viewport");
+
+    grouped.forEach((group, level) => {
+      group.forEach((node, row) => {
+        const button = document.createElement("button");
+        const status = statusFor(node);
+        button.type = "button";
+        button.className = `node ${status}`;
+        button.dataset.nodeId = node.id;
+        button.setAttribute("aria-label", `${node.name}, ${typeLabel(node.type)}, ${statusLabel(status)}`);
+        const name = document.createElement("span");
+        name.className = "node-name";
+        name.textContent = node.name;
+        const meta = document.createElement("span");
+        meta.className = "node-meta";
+        meta.textContent = `${typeLabel(node.type)} · ${statusLabel(status)}`;
+        button.append(name, meta);
+        button.addEventListener("click", () => selectNode(node.id));
+        stage.appendChild(button);
+        nodeElements.set(node.id, button);
+      });
+    });
+
+    const edgeSvg = document.getElementById("edges");
+    edgeSvg.innerHTML = `<defs><marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path class="edge-arrow" d="M0,0 L6,3 L0,6 Z"></path></marker><marker id="arrow-active" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path class="edge-arrow-active" d="M0,0 L6,3 L0,6 Z"></path></marker></defs>`;
+    const edgePaths = edges.map((_, index) => {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("class", "edge");
+      path.setAttribute("marker-end", "url(#arrow)");
+      path.dataset.edgeIndex = String(index);
+      edgeSvg.appendChild(path);
+      return path;
+    });
+
+    function layoutGraph() {
+      const stageWidth = Math.max(viewport.clientWidth, 760, 92 + (maxLevel + 1) * 220);
+      const stageHeight = Math.max(viewport.clientHeight, 500, 64 + maxRows * 100);
+      const graphWidth = maxLevel * 220 + 178;
+      const startX = Math.max(42, (stageWidth - graphWidth) / 2);
+      stage.style.width = `${stageWidth}px`;
+      stage.style.height = `${stageHeight}px`;
+      edgeSvg.setAttribute("viewBox", `0 0 ${stageWidth} ${stageHeight}`);
+
+      grouped.forEach((group, level) => {
+        const totalHeight = group.length * 100 - 38;
+        const startY = Math.max(30, (stageHeight - totalHeight) / 2);
+        group.forEach((node, row) => {
+          const button = nodeElements.get(node.id);
+          button.style.left = `${startX + level * 220}px`;
+          button.style.top = `${startY + row * 100}px`;
+        });
+      });
+
+      edges.forEach((edge, index) => {
+        const fromElement = nodeElements.get(edge.from);
+        const toElement = nodeElements.get(edge.to);
+        if (!fromElement || !toElement) return;
+        const startX = fromElement.offsetLeft + fromElement.offsetWidth;
+        const startY = fromElement.offsetTop + fromElement.offsetHeight / 2;
+        const endX = toElement.offsetLeft;
+        const endY = toElement.offsetTop + toElement.offsetHeight / 2;
+        const curve = Math.max(42, (endX - startX) * .46);
+        edgePaths[index].setAttribute("d", `M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}`);
+      });
+    }
+
+    layoutGraph();
+    new ResizeObserver(() => requestAnimationFrame(layoutGraph)).observe(viewport);
+
+    const reachableCount = start => {
+      const seen = new Set();
+      const pending = [start];
+      while (pending.length) {
+        const current = pending.shift();
+        (outgoing.get(current) || []).forEach(next => {
+          if (!seen.has(next)) { seen.add(next); pending.push(next); }
+        });
+      }
+      return seen.size;
+    };
+    const detailSection = (title, content) => `<section class="detail-section"><h3>${escapeHtml(title)}</h3>${content}</section>`;
+    const factList = facts => `<dl class="facts">${facts.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("")}</dl>`;
+    const messageList = (items, className = "") => `<ul class="detail-list">${items.map(item => `<li${className ? ` class="${className}"` : ""}>${escapeHtml(item)}</li>`).join("")}</ul>`;
+
+    function inspectorContent(node) {
+      const model = modelFor(node);
+      const nodeFindings = findingsFor(node);
+      const nodeGaps = gapsFor(node);
+      const sections = [];
+      if (nodeFindings.length) sections.push(detailSection("Issues detected", messageList(nodeFindings.map(item => item.message), "finding")));
+      if (nodeGaps.length) sections.push(detailSection("Coverage", messageList(nodeGaps.map(item => item.reason), "gap")));
+
+      if (model?.comparison) {
+        const comparison = model.comparison;
+        sections.push(detailSection("Rows", factList([
+          ["Candidate", formatNumber(comparison.ci_row_count)],
+          ["Production", formatNumber(comparison.production_row_count)],
+          ["Difference", formatPercent(comparison.row_count_relative_change)]
+        ])));
+        if (comparison.primary_key) {
+          const key = comparison.primary_key;
+          sections.push(detailSection("Primary key", factList([
+            ["Columns", values(key.columns).join(", ")],
+            ["Candidate only", formatNumber(key.ci_only_count)],
+            ["Production only", formatNumber(key.production_only_count)],
+            ["Duplicate keys", formatNumber(key.ci_duplicate_key_count)],
+            ["Null keys", formatNumber(key.ci_null_key_rows)]
+          ])));
+        }
+      } else if (node.type === "query" && node.record) {
+        const query = node.record;
+        const comparison = query.comparison;
+        sections.push(detailSection("Query", factList([
+          ["Primary key", values(query.primary_key).join(", ") || "none"],
+          ["Candidate rows", formatNumber(query.candidate_row_count)],
+          ["Production rows", formatNumber(query.production_row_count)]
+        ])));
+        if (comparison) sections.push(detailSection("Differences", factList([
+          ["Changed rows", formatNumber(comparison.changed_rows)],
+          ["Candidate only", formatNumber(comparison.candidate_only_rows)],
+          ["Production only", formatNumber(comparison.production_only_rows)],
+          ["Duplicate keys", formatNumber(comparison.candidate_duplicate_keys)]
+        ])));
+      }
+
+      const flows = columnLineage.filter(edge => edge.from === node.id || edge.to === node.id).slice(0, 8);
+      if (flows.length) sections.push(detailSection("Columns", `<div class="detail-list">${flows.map(edge => `<div class="flow"><span title="${escapeHtml(`${edge.from_name}.${edge.from_column}`)}">${escapeHtml(`${edge.from_name}.${edge.from_column}`)}</span><b>→</b><span title="${escapeHtml(`${edge.to_name}.${edge.to_column}`)}">${escapeHtml(`${edge.to_name}.${edge.to_column}`)}</span></div>`).join("")}</div>`));
+
+      sections.push(detailSection("Downstream", factList([
+        ["Direct", formatNumber((outgoing.get(node.id) || []).length)],
+        ["Total", formatNumber(reachableCount(node.id))]
+      ])));
+      return sections.join("") || `<p class="empty">No comparison evidence is available.</p>`;
+    }
+
+    function selectNode(id) {
+      const node = nodeMap.get(id);
+      document.querySelectorAll(".node").forEach(element => element.classList.toggle("is-selected", element.dataset.nodeId === id));
+      document.querySelectorAll(".edge").forEach(element => {
+        const edge = edges[Number(element.dataset.edgeIndex)];
+        const connected = edge && (edge.from === id || edge.to === id);
+        element.classList.toggle("is-connected", connected);
+        element.setAttribute("marker-end", connected ? "url(#arrow-active)" : "url(#arrow)");
+      });
+      document.getElementById("inspector-title").textContent = node.name;
+      document.getElementById("inspector-kind").textContent = `${typeLabel(node.type)} · ${statusLabel(statusFor(node))}`;
+      document.getElementById("inspector-id").textContent = node.id;
+      document.getElementById("inspector-body").innerHTML = inspectorContent(node);
+    }
+
+    const initial = nodes.find(node => statusFor(node) === "findings") || nodes[0];
+    if (initial) selectNode(initial.id);
+    else document.getElementById("inspector-body").innerHTML = `<p class="empty">This report has no lineage.</p>`;
+  </script>
+</body>
+</html>
