@@ -127,7 +127,7 @@ jobs:
           rm -rf "dist/${legacy}"
           rm -rf "dist/${package}"
       - name: Upload release archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -205,7 +205,7 @@ jobs:
           Copy-Item -LiteralPath .\install.ps1 -Destination .\dist\install.ps1
           Remove-Item -LiteralPath $payload -Recurse -Force
       - name: Upload Windows release files
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-windows
           path: dist/*
@@ -285,7 +285,7 @@ jobs:
             dist/install.ps1
           sbom-path: dist/fortify-${{ env.RELEASE_TAG }}.spdx.json
       - name: Upload release bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-bundle
           path: dist/*
